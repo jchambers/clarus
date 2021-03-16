@@ -4,3 +4,9 @@ description = "Tools for working with classic Mac OS resources in Rust"
 version = "0.1.0"
 authors = ["Jon Chambers <jon.chambers@gmail.com>"]
 edition = "2018"
+
+[dependencies]
+memchr = "2.3.4"
+
+[dev-dependencies]
+indoc = "1.0"
