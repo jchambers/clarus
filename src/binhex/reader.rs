@@ -147,24 +147,30 @@ impl<'a, R: BufRead> Read for EncodedBinhexReader<'a, R> {
 
             // We know for sure that the buffer begins with a non-whitespace character; copy a
             // contiguous chain of bytes until the next whitespace character, the end of the source
-            // buffer, or the end of the destination buffer, whichever comes first.
+            // buffer, the end of the BinHex data, or the end of the destination buffer, whichever
+            // comes first.
             assert!(buf.len() > 0);
 
             let capacity = min(buf.len(), dest.len() - bytes_copied);
 
-            let next_whitespace = min(memchr::memchr(b' ', &buf[..capacity])
-                                          .unwrap_or_else(|| usize::MAX),
-                                      memchr::memchr3(b'\t', b'\r', b'\n', &buf[..capacity])
-                                          .unwrap_or_else(|| usize::MAX));
+            let next_whitespace = match (memchr::memchr(b' ', &buf[..capacity]),
+                                         memchr::memchr3(b'\t', b'\r', b'\n', &buf[..capacity])) {
+                (Some(a), Some(b)) => Some(min(a, b)),
+                (a, b) => a.or(b),
+            };
 
-            let end = min(next_whitespace, capacity);
+            let src_end = match next_whitespace {
+                Some(i) => min(i, capacity),
+                None => capacity
+            };
+
             let end = match memchr::memchr(DATA_DELIMITER, buf) {
-                Some(data_end) if data_end < end => {
+                Some(data_end) if data_end < src_end => {
                     // We'll reach the end of the entire BinHex stream in this iteration
                     self.found_data_end = true;
                     data_end
                 }
-                _ => end
+                _ => src_end
             };
 
             dest[bytes_copied..bytes_copied + end].copy_from_slice(&buf[..end]);
