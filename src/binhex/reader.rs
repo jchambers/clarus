@@ -1,23 +1,25 @@
-// http://files.stairways.com/other/binhex-40-specs-info.txt
-// https://tools.ietf.org/html/rfc1741
-
 use std::io::{BufRead, Error, ErrorKind, Read, Result};
 use std::cmp::min;
 
 const BANNER: &[u8] = b"(This file must be converted with BinHex";
 const DATA_DELIMITER: u8 = b':';
 
-struct EncodedBinhexReader <'a, R: 'a + BufRead> {
+/// A `Read` implementation that extracts BinHex-encoded data from an underlying reader.
+///
+/// The data produced by an `EncodedBinHexReader` is the still-encoded data contained within a
+/// BinHex source (usually a file) stripped of extraneous banners, delimiters, and whitespace.
+/// Callers will almost certainly need to pass the data through a BinHex decoder.
+struct EncodedBinHexReader<'a, R: 'a + BufRead> {
     source: &'a mut R,
 
     found_data_start: bool,
     found_data_end: bool,
 }
 
-impl<'a, R: BufRead> EncodedBinhexReader<'a, R> {
+impl<'a, R: BufRead> EncodedBinHexReader<'a, R> {
 
     pub fn new(source: &'a mut R) -> Self {
-        EncodedBinhexReader {
+        EncodedBinHexReader {
             source,
 
             found_data_start: false,
@@ -110,7 +112,7 @@ impl<'a, R: BufRead> EncodedBinhexReader<'a, R> {
     }
 }
 
-impl<'a, R: BufRead> Read for EncodedBinhexReader<'a, R> {
+impl<'a, R: BufRead> Read for EncodedBinHexReader<'a, R> {
     fn read(&mut self, dest: &mut [u8]) -> Result<usize> {
         if dest.len() == 0 {
             return Ok(0);
@@ -187,7 +189,7 @@ impl<'a, R: BufRead> Read for EncodedBinhexReader<'a, R> {
 
 #[cfg(test)]
 mod tests {
-    use super::EncodedBinhexReader;
+    use super::EncodedBinHexReader;
     use indoc::indoc;
     use std::io::{Cursor, BufReader, ErrorKind, Read};
 
@@ -201,7 +203,7 @@ mod tests {
         });
 
         let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinhexReader::new(&mut buf_reader);
+        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
 
         let mut binhex_data = vec![];
 
@@ -218,7 +220,7 @@ mod tests {
         });
 
         let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinhexReader::new(&mut buf_reader);
+        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
 
         let mut binhex_data = vec![];
 
@@ -236,7 +238,7 @@ mod tests {
         });
 
         let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinhexReader::new(&mut buf_reader);
+        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
 
         let mut binhex_data = vec![];
 
@@ -252,7 +254,7 @@ mod tests {
         });
 
         let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinhexReader::new(&mut buf_reader);
+        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
 
         binhex_reader.seek_to_banner_end().unwrap();
 
@@ -271,7 +273,7 @@ mod tests {
         });
 
         let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinhexReader::new(&mut buf_reader);
+        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
 
         binhex_reader.seek_to_banner_end().unwrap();
 
@@ -291,7 +293,7 @@ mod tests {
         });
 
         let mut buf_reader = BufReader::with_capacity(7, cursor);
-        let mut binhex_reader = EncodedBinhexReader::new(&mut buf_reader);
+        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
 
         binhex_reader.seek_to_banner_end().unwrap();
 
@@ -308,7 +310,7 @@ mod tests {
         let cursor = Cursor::new(br#"This is not a legit BinHex file:"#);
 
         let mut buf_reader = BufReader::with_capacity(7, cursor);
-        let mut binhex_reader = EncodedBinhexReader::new(&mut buf_reader);
+        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
 
         assert_eq!(binhex_reader.seek_to_banner_end().map_err(|e| e.kind()),
                    Err(ErrorKind::InvalidData));
@@ -322,7 +324,7 @@ mod tests {
         });
 
         let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinhexReader::new(&mut buf_reader);
+        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
 
         binhex_reader.seek_to_data_start().unwrap();
 
@@ -339,7 +341,7 @@ mod tests {
         let cursor = Cursor::new(br#"This is not a legit BinHex file"#);
 
         let mut buf_reader = BufReader::with_capacity(7, cursor);
-        let mut binhex_reader = EncodedBinhexReader::new(&mut buf_reader);
+        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
 
         assert_eq!(binhex_reader.seek_to_data_start().map_err(|e| e.kind()),
                    Err(ErrorKind::InvalidData));
