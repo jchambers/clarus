@@ -3,3 +3,4 @@
 
 mod read;
 mod expand;
+mod archive;

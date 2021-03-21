@@ -6,6 +6,7 @@ authors = ["Jon Chambers <jon.chambers@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+crc = "1.8.1"
 memchr = "2.3.4"
 
 [dev-dependencies]
