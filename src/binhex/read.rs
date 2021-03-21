@@ -34,7 +34,7 @@ impl<'a, R: BufRead> EncodedBinHexReader<'a, R> {
             let buf = match self.source.fill_buf() {
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
-                Ok(buf) if buf.len() == 0 => {
+                Ok(buf) if buf.is_empty() => {
                     return Err(Error::new(ErrorKind::InvalidData,
                                           "Stream did not contain a BinHex banner"));
                 }
@@ -89,7 +89,7 @@ impl<'a, R: BufRead> EncodedBinHexReader<'a, R> {
             let buf = match self.source.fill_buf() {
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
-                Ok(buf) if buf.len() == 0 => {
+                Ok(buf) if buf.is_empty() => {
                     return Err(Error::new(ErrorKind::InvalidData,
                                           "Stream did not contain an opening ':' delimiter"));
                 }
@@ -114,7 +114,7 @@ impl<'a, R: BufRead> EncodedBinHexReader<'a, R> {
 
 impl<'a, R: BufRead> Read for EncodedBinHexReader<'a, R> {
     fn read(&mut self, dest: &mut [u8]) -> Result<usize> {
-        if dest.len() == 0 {
+        if dest.is_empty() {
             return Ok(0);
         }
 
@@ -129,7 +129,7 @@ impl<'a, R: BufRead> Read for EncodedBinHexReader<'a, R> {
             let buf = match self.source.fill_buf() {
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
-                Ok(buf) if buf.len() == 0 => {
+                Ok(buf) if buf.is_empty() => {
                     return Err(Error::new(ErrorKind::InvalidData,
                                           "Stream did not contain a closing ':' delimiter"));
                 }
@@ -151,7 +151,7 @@ impl<'a, R: BufRead> Read for EncodedBinHexReader<'a, R> {
             // contiguous chain of bytes until the next whitespace character, the end of the source
             // buffer, the end of the BinHex data, or the end of the destination buffer, whichever
             // comes first.
-            assert!(buf.len() > 0);
+            assert!(!buf.is_empty());
 
             let capacity = min(buf.len(), dest.len() - bytes_copied);
 
