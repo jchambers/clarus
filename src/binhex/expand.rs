@@ -52,19 +52,18 @@ impl State {
     }
 }
 
-struct BinHexExpander<'a, R: 'a + io::BufRead> {
-    source: &'a mut R,
-
+pub struct BinHexExpander<R: io::BufRead> {
+    source: R,
     state: State,
 }
 
-impl<'a, R: io::BufRead> BinHexExpander<'a, R> {
-    pub fn new(source: &'a mut R) -> Self {
+impl<R: io::BufRead> BinHexExpander<R> {
+    pub fn new(source: R) -> Self {
         BinHexExpander { source, state: State::Scan(None) }
     }
 }
 
-impl<'a, R: io::BufRead> io::Read for BinHexExpander<'a, R> {
+impl<R: io::BufRead> io::Read for BinHexExpander<R> {
     fn read(&mut self, dest: &mut [u8]) -> io::Result<usize> {
         let mut bytes_copied = 0;
 

@@ -9,16 +9,16 @@ const DATA_DELIMITER: u8 = b':';
 /// The data produced by an `EncodedBinHexReader` is the still-encoded data contained within a
 /// BinHex source (usually a file) stripped of extraneous banners, delimiters, and whitespace.
 /// Callers will almost certainly need to pass the data through a BinHex decoder.
-struct EncodedBinHexReader<'a, R: 'a + BufRead> {
-    source: &'a mut R,
+pub struct EncodedBinHexReader<R: BufRead> {
+    source: R,
 
     found_data_start: bool,
     found_data_end: bool,
 }
 
-impl<'a, R: BufRead> EncodedBinHexReader<'a, R> {
+impl<R: BufRead> EncodedBinHexReader<R> {
 
-    pub fn new(source: &'a mut R) -> Self {
+    pub fn new(source: R) -> Self {
         EncodedBinHexReader {
             source,
 
@@ -112,7 +112,7 @@ impl<'a, R: BufRead> EncodedBinHexReader<'a, R> {
     }
 }
 
-impl<'a, R: BufRead> Read for EncodedBinHexReader<'a, R> {
+impl<R: BufRead> Read for EncodedBinHexReader<R> {
     fn read(&mut self, dest: &mut [u8]) -> Result<usize> {
         if dest.is_empty() {
             return Ok(0);
