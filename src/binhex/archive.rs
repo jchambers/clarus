@@ -1,10 +1,14 @@
 use std::convert::{TryFrom, TryInto};
-use std::io::{BufRead, BufReader, Read, Error, ErrorKind};
+use std::io::{BufRead, BufReader, Read, Error, ErrorKind, Write};
 use super::expand::BinHexExpander;
 use super::read::EncodedBinHexReader;
 use radix64::CustomConfig;
 use radix64::io::DecodeReader;
 use std::ops::Deref;
+use std::cmp;
+use crc16::{State, XMODEM};
+
+const COPY_BUFFER_LENGTH: usize = 1024;
 
 lazy_static::lazy_static! {
     static ref BINHEX_CONFIG: CustomConfig = CustomConfig::with_alphabet(
@@ -24,15 +28,15 @@ pub struct BinHexHeader {
     resource_fork_length: usize,
 }
 
-pub struct BinHexArchive<R: BufRead> {
-    source: BinHexExpander<BufReader<DecodeReader<&'static CustomConfig, EncodedBinHexReader<R>>>>,
+pub struct BinHexArchive<S: BufRead> {
+    source: BinHexExpander<BufReader<DecodeReader<&'static CustomConfig, EncodedBinHexReader<S>>>>,
 
     header: Option<BinHexHeader>,
 }
 
-impl<R: BufRead> BinHexArchive<R> {
+impl<S: BufRead> BinHexArchive<S> {
 
-    pub fn new(source: R) -> Self {
+    pub fn new(source: S) -> Self {
         let encoded_reader = EncodedBinHexReader::new(source);
         let decoder = DecodeReader::new(BINHEX_CONFIG.deref(), encoded_reader);
         let buf_decoder = BufReader::new(decoder);
@@ -69,6 +73,67 @@ impl<R: BufRead> BinHexArchive<R> {
 
         Ok(header)
     }
+
+    pub fn extract<D: Write, Z: Write>(mut self, data_writer: &mut D, resource_writer: &mut Z)
+        -> std::io::Result<()> {
+
+        let header = self.header()?;
+
+        let data_hash = Self::copy_and_checksum(&mut self.source, data_writer, header.data_fork_length)?;
+
+        let data_checksum = {
+            let mut data_checksum_bytes = [0; 2];
+            self.source.read_exact(&mut data_checksum_bytes)?;
+
+            u16::from_be_bytes(data_checksum_bytes)
+        };
+
+        if data_checksum != data_hash {
+            return Err(Error::new(ErrorKind::InvalidData,
+                                  format!("Data fork checksum failed; expected {:04x}, calculated {:04x}",
+                                          data_checksum, data_hash)));
+        }
+
+        let resource_hash = Self::copy_and_checksum(&mut self.source, resource_writer, header.resource_fork_length)?;
+
+        let resource_checksum = {
+            let mut resource_checksum_bytes = [0; 2];
+            self.source.read_exact(&mut resource_checksum_bytes)?;
+
+            u16::from_be_bytes(resource_checksum_bytes)
+        };
+
+        if resource_checksum != resource_hash {
+            return Err(Error::new(ErrorKind::InvalidData,
+                                  format!("Resource fork checksum failed; expected {:04x}, calculated {:04x}",
+                                          resource_checksum, resource_hash)));
+        }
+
+        Ok(())
+    }
+
+    fn copy_and_checksum<R: Read, W: Write>(src: &mut R, dest: &mut W, len: usize)
+        -> std::io::Result<u16> {
+
+        let mut buf = [0; COPY_BUFFER_LENGTH];
+        let mut bytes_copied = 0;
+
+        let mut crc = State::<XMODEM>::new();
+
+        loop {
+            let capacity = cmp::min(len - bytes_copied, buf.len());
+            let bytes_read = src.read(&mut buf[..capacity])?;
+
+            dest.write_all(&buf[..bytes_read])?;
+            crc.update(&buf[..bytes_read]);
+
+            bytes_copied += bytes_read;
+
+            if bytes_copied == len {
+                break Ok(crc.get());
+            }
+        }
+    }
 }
 
 impl TryFrom<Vec<u8>> for BinHexHeader {
@@ -96,13 +161,13 @@ impl TryFrom<Vec<u8>> for BinHexHeader {
 
         debug_assert!(remaining_bytes.is_empty());
 
-        let calculated_checksum = crc16::State::<crc16::XMODEM>::calculate(&header_bytes[..header_bytes.len() - 2]);
-        let provided_checksum = u16::from_be_bytes(checksum_bytes.try_into().unwrap());
+        let hash = crc16::State::<crc16::XMODEM>::calculate(&header_bytes[..header_bytes.len() - 2]);
+        let checksum = u16::from_be_bytes(checksum_bytes.try_into().unwrap());
 
-        if provided_checksum != calculated_checksum {
+        if checksum != hash {
             return Err(Error::new(ErrorKind::InvalidData,
                                   format!("Header checksum failed; expected {:04x}, calculated {:04x}",
-                                          provided_checksum, calculated_checksum)));
+                                          checksum, hash)));
         }
 
         let (name_cow, _, _) = encoding_rs::MACINTOSH.decode(name_bytes);
@@ -148,5 +213,20 @@ mod test {
         assert_eq!(0, header.flag);
         assert_eq!(DATA_FORK.len(), header.data_fork_length);
         assert_eq!(RESOURCE_FORK.len(), header.resource_fork_length);
+    }
+
+    #[test]
+    fn extract() {
+        let cursor = Cursor::new(BINHEX_DATA);
+
+        let mut archive = BinHexArchive::new(cursor);
+
+        let mut data_fork = vec![];
+        let mut resource_fork = vec![];
+
+        archive.extract(&mut data_fork, &mut resource_fork).unwrap();
+
+        assert_eq!(DATA_FORK, data_fork.as_slice());
+        assert_eq!(RESOURCE_FORK, resource_fork.as_slice());
     }
 }
