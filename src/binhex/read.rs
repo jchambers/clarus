@@ -84,27 +84,25 @@ impl<R: Read> Read for EncodedBinHexReader<R> {
             let mut bytes_consumed = 0;
 
             while bytes_consumed < bytes_read && self.state != State::Done {
-                let available = &buf[bytes_consumed..bytes_read];
-
-                debug_assert!(!available.is_empty());
+                debug_assert!(!buf[bytes_consumed..bytes_read].is_empty());
 
                 let event = match self.state {
                     State::FindBannerStart => {
-                        match memchr::memchr(BANNER[0], available) {
+                        match memchr::memchr(BANNER[0], &buf[bytes_consumed..bytes_read]) {
                             Some(start) => {
                                 bytes_consumed += start + 1;
                                 Event::FoundBannerStart
                             }
                             None => {
-                                bytes_consumed += available.len();
+                                bytes_consumed = bytes_read;
                                 Event::ConsumedBytes
                             }
                         }
                     }
                     State::PartialBannerMatch(matched) => {
-                        let check_len = cmp::min(available.len(), BANNER.len() - matched);
+                        let check_len = cmp::min(bytes_read - bytes_consumed, BANNER.len() - matched);
 
-                        if available[..check_len] == BANNER[matched..matched + check_len] {
+                        if buf[bytes_consumed..].starts_with(&BANNER[matched..matched + check_len]) {
                             bytes_consumed += check_len;
                             Event::MatchedBannerBytes(check_len)
                         } else {
@@ -112,47 +110,43 @@ impl<R: Read> Read for EncodedBinHexReader<R> {
                         }
                     }
                     State::FindDataStart => {
-                        match memchr::memchr(DATA_DELIMITER, available) {
+                        match memchr::memchr(DATA_DELIMITER, &buf[bytes_consumed..bytes_read]) {
                             Some(pos) => {
                                 bytes_consumed += pos + 1;
                                 Event::FoundDataStart
                             }
                             None => {
-                                bytes_consumed += available.len();
+                                bytes_consumed = bytes_read;
                                 Event::ConsumedBytes
                             }
                         }
                     }
                     State::ReadData => {
-                        match next_data_byte(available) {
+                        match next_data_byte(&buf[bytes_consumed..bytes_read]) {
                             Some(start) => {
-                                let chunk_end = next_whitespace(&available[start..])
-                                    .unwrap_or_else(|| available.len());
+                                let data_bytes =
+                                    compact(&mut buf[bytes_consumed + start..bytes_read]);
 
-                                let (len, found_stream_end) = match memchr::memchr(
-                                    DATA_DELIMITER, &available[start..chunk_end]) {
+                                if bytes_consumed + start > 0 {
+                                    buf.copy_within(bytes_consumed + start..bytes_consumed + start + data_bytes, 0);
+                                }
 
-                                    Some(stream_end) => (stream_end - start, true),
-                                    None => (chunk_end - start, false)
-                                };
+                                match memchr::memchr(DATA_DELIMITER, &buf[..data_bytes]) {
+                                    Some(data_end) => {
+                                        bytes_copied += data_end;
 
-                                // Shift the contents of `buf` left to consume whitespace.
-                                // Translating indices from `available` back to `buf` is a little
-                                // awkward, but necessary because the start of the copy destination
-                                // necessarily falls outside of the `available` range.
-                                buf.copy_within(bytes_consumed + start..bytes_consumed + start + len, bytes_copied);
+                                        Event::FoundDataEnd
+                                    }
+                                    None => {
+                                        bytes_consumed = bytes_read;
+                                        bytes_copied += data_bytes;
 
-                                bytes_consumed += len;
-                                bytes_copied += len;
-
-                                if found_stream_end {
-                                    Event::FoundDataEnd
-                                } else {
-                                    Event::ConsumedBytes
+                                        Event::ConsumedBytes
+                                    }
                                 }
                             }
                             None => {
-                                bytes_consumed += available.len();
+                                bytes_consumed = bytes_read;
                                 Event::ConsumedBytes
                             }
                         }
@@ -194,6 +188,24 @@ fn next_data_byte(bytes: &[u8]) -> Option<usize> {
     }
 }
 
+fn compact(bytes: &mut [u8]) -> usize {
+    let mut whitespace_removed = 0;
+
+    while let Some(start) = next_whitespace(&bytes[..bytes.len() - whitespace_removed]) {
+        match next_data_byte(&bytes[start..bytes.len() - whitespace_removed]) {
+            Some(len) => {
+                whitespace_removed += len;
+                bytes.copy_within(start + len.., start);
+            }
+            None => {
+                whitespace_removed += bytes.len() - whitespace_removed - start;
+            }
+        }
+    }
+
+    bytes.len() - whitespace_removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,7 +243,7 @@ mod tests {
         let expected = br#"$f*TEQKPH#edCA0d,R4iG!#3$L8!N!-TR@dpN!8J5'9XE'mJCR*[E5"dD'8JC'&dB5"QEh*V)5!pN!9Bm5f3"5")C@aXEb"QFQpY)(4SC5"bCA0[GA*MC5"QEh*V)5!YN!8SI!"#;
 
         assert_eq!(binhex_reader.read(&mut buf).unwrap(), 134);
-        assert_eq!(buf[0..=134], expected[0..]);
+        assert_eq!(buf[0..134], expected[0..]);
     }
 
     #[test]
@@ -318,5 +330,43 @@ mod tests {
         assert_eq!(None, super::next_data_byte(b""));
         assert_eq!(None, super::next_data_byte(b" \r\n\t"));
         assert_eq!(Some(4), super::next_data_byte(b"    This isn't all whitespace\r\n\t"));
+    }
+
+    #[test]
+    fn compact() {
+        let mut bytes = Vec::from("compaction!");
+
+        assert_eq!(11, super::compact(bytes.as_mut_slice()));
+        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
+
+        bytes = Vec::from("    compaction!");
+
+        assert_eq!(11, super::compact(bytes.as_mut_slice()));
+        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
+
+        bytes = Vec::from("compaction!    ");
+
+        assert_eq!(11, super::compact(bytes.as_mut_slice()));
+        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
+
+        bytes = Vec::from("    compaction!    ");
+
+        assert_eq!(11, super::compact(bytes.as_mut_slice()));
+        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
+
+        bytes = Vec::from("c  omp a       ction !");
+
+        assert_eq!(11, super::compact(bytes.as_mut_slice()));
+        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
+
+        bytes = Vec::from("  c  omp a       ction !");
+
+        assert_eq!(11, super::compact(bytes.as_mut_slice()));
+        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
+
+        bytes = Vec::from("c  omp a       ction !          ");
+
+        assert_eq!(11, super::compact(bytes.as_mut_slice()));
+        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
     }
 }
