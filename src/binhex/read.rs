@@ -1,5 +1,5 @@
-use std::io::{BufRead, Error, ErrorKind, Read, Result};
-use std::cmp::min;
+use std::cmp;
+use std::io::{Error, ErrorKind, Read, Result};
 
 const BANNER: &[u8] = b"(This file must be converted with BinHex";
 const DATA_DELIMITER: u8 = b':';
@@ -9,189 +9,196 @@ const DATA_DELIMITER: u8 = b':';
 /// The data produced by an `EncodedBinHexReader` is the still-encoded data contained within a
 /// BinHex source (usually a file) stripped of extraneous banners, delimiters, and whitespace.
 /// Callers will almost certainly need to pass the data through a BinHex decoder.
-pub struct EncodedBinHexReader<R: BufRead> {
+pub struct EncodedBinHexReader<R: Read> {
     source: R,
-
-    found_data_start: bool,
-    found_data_end: bool,
+    state: State,
 }
 
-impl<R: BufRead> EncodedBinHexReader<R> {
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum State {
+    FindBannerStart,
+    PartialBannerMatch(usize),
+    FindDataStart,
+    ReadData,
+    Done,
+}
+
+#[derive(Copy, Clone, Debug)]
+enum Event {
+    ConsumedBytes,
+    FoundBannerStart,
+    MatchedBannerBytes(usize),
+    FoundDataStart,
+    FoundDataEnd,
+}
+
+impl State {
+    fn advance(&self, event: Event) -> Result<Self> {
+        match (self, event) {
+            (State::FindBannerStart, Event::ConsumedBytes) => Ok(State::FindBannerStart),
+            (State::FindBannerStart, Event::FoundBannerStart) => Ok(State::PartialBannerMatch(1)),
+            (State::PartialBannerMatch(_), Event::ConsumedBytes) => Ok(State::FindBannerStart),
+            (State::PartialBannerMatch(len), Event::MatchedBannerBytes(matched)) => {
+                if len + matched == BANNER.len() {
+                    Ok(State::FindDataStart)
+                } else {
+                    Ok(State::PartialBannerMatch(len + matched))
+                }
+            }
+            (State::FindDataStart, Event::ConsumedBytes) => Ok(State::FindDataStart),
+            (State::FindDataStart, Event::FoundDataStart) => Ok(State::ReadData),
+            (State::ReadData, Event::ConsumedBytes) => Ok(State::ReadData),
+            (State::ReadData, Event::FoundDataEnd) => Ok(State::Done),
+            _ => Err(Error::new(ErrorKind::InvalidData,
+                                format!("Illegal state transition from {:?} with {:?}", self, event))),
+        }
+    }
+}
+
+impl<R: Read> EncodedBinHexReader<R> {
 
     pub fn new(source: R) -> Self {
         EncodedBinHexReader {
             source,
-
-            found_data_start: false,
-            found_data_end: false,
+            state: State::FindBannerStart,
         }
-    }
-
-    fn seek_to_banner_end(&mut self) -> Result<()> {
-        let mut matched_len = 0;
-
-        while matched_len < BANNER.len() {
-            let buf = match self.source.fill_buf() {
-                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-                Ok(buf) if buf.is_empty() => {
-                    return Err(Error::new(ErrorKind::InvalidData,
-                                          "Stream did not contain a BinHex banner"));
-                }
-                Ok(buf) => buf,
-            };
-
-            // Check for a match for however many bytes we still need right at the start of the
-            // buffer (facilitates partial match carryover and probably just works 99% of the time
-            // for the full banner anyhow).
-            let compare_len = min(BANNER.len() - matched_len, buf.len());
-
-            if buf[0..compare_len] == BANNER[matched_len..matched_len + compare_len] {
-                matched_len += compare_len;
-
-                // We've either consumed enough of the buffer to complete the match or we've reached
-                // the end of the buffer; either way, consume the bytes read up to that point.
-                self.source.consume(compare_len);
-            } else {
-                // We didn't find a match at the start of the buffer for either the full banner or
-                // whatever part we were looking for. Search for other possible banner starts
-                // instead. This will find EITHER a match that's completely contained within the
-                // buffer XOR a partial match at the end of the buffer.
-                let match_start = memchr::memchr_iter(BANNER[0], buf)
-                    .find(|&start| {
-                        if buf.len() - start >= BANNER.len() {
-                            buf[start..start + BANNER.len()] == *BANNER
-                        } else {
-                            buf[start..] == BANNER[0..buf.len() - start]
-                        }
-                    });
-
-                match match_start {
-                    None => {
-                        matched_len = 0;
-
-                        let consumed = buf.len();
-                        self.source.consume(consumed);
-                    }
-                    Some(start) => {
-                        matched_len = min(BANNER.len(), buf.len() - start);
-                        self.source.consume(start + matched_len);
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn seek_to_data_start(&mut self) -> Result<()> {
-        while !self.found_data_start {
-            let buf = match self.source.fill_buf() {
-                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-                Ok(buf) if buf.is_empty() => {
-                    return Err(Error::new(ErrorKind::InvalidData,
-                                          "Stream did not contain an opening ':' delimiter"));
-                }
-                Ok(buf) => buf,
-            };
-
-            match memchr::memchr(DATA_DELIMITER, buf) {
-                None => {
-                    let len = buf.len();
-                    self.source.consume(len);
-                }
-                Some(i) => {
-                    self.source.consume(i + 1);
-                    self.found_data_start = true;
-                }
-            }
-        }
-
-        Ok(())
     }
 }
 
-impl<R: BufRead> Read for EncodedBinHexReader<R> {
-    fn read(&mut self, dest: &mut [u8]) -> Result<usize> {
-        if dest.is_empty() {
+impl<R: Read> Read for EncodedBinHexReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        if buf.is_empty() {
             return Ok(0);
-        }
-
-        if !self.found_data_start {
-            self.seek_to_banner_end()?;
-            self.seek_to_data_start()?;
         }
 
         let mut bytes_copied = 0;
 
-        loop {
-            let buf = match self.source.fill_buf() {
+        while bytes_copied == 0 && self.state != State::Done {
+            let bytes_read = match self.source.read(buf) {
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
-                Ok(buf) if buf.is_empty() => {
-                    return Err(Error::new(ErrorKind::InvalidData,
-                                          "Stream did not contain a closing ':' delimiter"));
-                }
-                Ok(buf) => buf,
+                Ok(0) => return Err(Error::from(ErrorKind::UnexpectedEof)),
+                Ok(bytes_read) => bytes_read,
             };
 
-            {
-                let leading_whitespace_bytes = buf.iter()
-                    .take_while(|b| b" \t\r\n".contains(b))
-                    .count();
+            let mut bytes_consumed = 0;
 
-                if leading_whitespace_bytes > 0 {
-                    self.source.consume(leading_whitespace_bytes);
-                    continue;
-                }
+            while bytes_consumed < bytes_read && self.state != State::Done {
+                let available = &buf[bytes_consumed..bytes_read];
+
+                debug_assert!(!available.is_empty());
+
+                let event = match self.state {
+                    State::FindBannerStart => {
+                        match memchr::memchr(BANNER[0], available) {
+                            Some(start) => {
+                                bytes_consumed += start + 1;
+                                Event::FoundBannerStart
+                            }
+                            None => {
+                                bytes_consumed += available.len();
+                                Event::ConsumedBytes
+                            }
+                        }
+                    }
+                    State::PartialBannerMatch(matched) => {
+                        let check_len = cmp::min(available.len(), BANNER.len() - matched);
+
+                        if available[..check_len] == BANNER[matched..matched + check_len] {
+                            bytes_consumed += check_len;
+                            Event::MatchedBannerBytes(check_len)
+                        } else {
+                            Event::ConsumedBytes
+                        }
+                    }
+                    State::FindDataStart => {
+                        match memchr::memchr(DATA_DELIMITER, available) {
+                            Some(pos) => {
+                                bytes_consumed += pos + 1;
+                                Event::FoundDataStart
+                            }
+                            None => {
+                                bytes_consumed += available.len();
+                                Event::ConsumedBytes
+                            }
+                        }
+                    }
+                    State::ReadData => {
+                        match next_data_byte(available) {
+                            Some(start) => {
+                                let chunk_end = next_whitespace(&available[start..])
+                                    .unwrap_or_else(|| available.len());
+
+                                let (len, found_stream_end) = match memchr::memchr(
+                                    DATA_DELIMITER, &available[start..chunk_end]) {
+
+                                    Some(stream_end) => (stream_end - start, true),
+                                    None => (chunk_end - start, false)
+                                };
+
+                                // Shift the contents of `buf` left to consume whitespace.
+                                // Translating indices from `available` back to `buf` is a little
+                                // awkward, but necessary because the start of the copy destination
+                                // necessarily falls outside of the `available` range.
+                                buf.copy_within(bytes_consumed + start..bytes_consumed + start + len, bytes_copied);
+
+                                bytes_consumed += len;
+                                bytes_copied += len;
+
+                                if found_stream_end {
+                                    Event::FoundDataEnd
+                                } else {
+                                    Event::ConsumedBytes
+                                }
+                            }
+                            None => {
+                                bytes_consumed += available.len();
+                                Event::ConsumedBytes
+                            }
+                        }
+                    }
+                    State::Done => {
+                        return Ok(bytes_copied);
+                    }
+                };
+
+                self.state = self.state.advance(event)?;
             }
+        }
 
-            // We know for sure that the buffer begins with a non-whitespace character; copy a
-            // contiguous chain of bytes until the next whitespace character, the end of the source
-            // buffer, the end of the BinHex data, or the end of the destination buffer, whichever
-            // comes first.
-            assert!(!buf.is_empty());
+        Ok(bytes_copied)
+    }
+}
 
-            let capacity = min(buf.len(), dest.len() - bytes_copied);
+fn next_whitespace(bytes: &[u8]) -> Option<usize> {
+    match (memchr::memchr(b' ', bytes),
+           memchr::memchr3(b'\t', b'\r', b'\n', bytes)) {
+        (Some(a), Some(b)) => Some(cmp::min(a, b)),
+        (a, b) => a.or(b),
+    }
+}
 
-            let next_whitespace = match (memchr::memchr(b' ', &buf[..capacity]),
-                                         memchr::memchr3(b'\t', b'\r', b'\n', &buf[..capacity])) {
-                (Some(a), Some(b)) => Some(min(a, b)),
-                (a, b) => a.or(b),
-            };
+fn next_data_byte(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() {
+        None
+    } else {
+        let leading_whitespace_bytes = bytes.iter()
+            .take_while(|b| b" \t\r\n".contains(b))
+            .count();
 
-            let src_end = match next_whitespace {
-                Some(i) => min(i, capacity),
-                None => capacity
-            };
-
-            let end = match memchr::memchr(DATA_DELIMITER, buf) {
-                Some(data_end) if data_end < src_end => {
-                    // We'll reach the end of the entire BinHex stream in this iteration
-                    self.found_data_end = true;
-                    data_end
-                }
-                _ => src_end
-            };
-
-            dest[bytes_copied..bytes_copied + end].copy_from_slice(&buf[..end]);
-            self.source.consume(end);
-
-            bytes_copied += end;
-
-            if bytes_copied == dest.len() || self.found_data_end {
-                return Ok(bytes_copied);
-            }
+        if leading_whitespace_bytes == bytes.len() {
+            None
+        } else {
+            Some(leading_whitespace_bytes)
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::EncodedBinHexReader;
+    use super::*;
     use indoc::indoc;
-    use std::io::{Cursor, BufReader, ErrorKind, Read};
+    use std::io::{Cursor, ErrorKind, Read};
 
     #[test]
     fn read() {
@@ -202,13 +209,50 @@ mod tests {
             YN!8SI!:"#
         });
 
-        let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
-
+        let mut binhex_reader = EncodedBinHexReader::new(cursor);
         let mut binhex_data = vec![];
 
         assert_eq!(binhex_reader.read_to_end(&mut binhex_data).unwrap(), 134);
         assert_eq!(binhex_data.as_slice(), br#"$f*TEQKPH#edCA0d,R4iG!#3$L8!N!-TR@dpN!8J5'9XE'mJCR*[E5"dD'8JC'&dB5"QEh*V)5!pN!9Bm5f3"5")C@aXEb"QFQpY)(4SC5"bCA0[GA*MC5"QEh*V)5!YN!8SI!"#);
+    }
+
+    #[test]
+    fn read_large_buffer() {
+        let cursor = Cursor::new(indoc! {br#"
+            (This file must be converted with BinHex 4.0)
+            :$f*TEQKPH#edCA0d,R4iG!#3$L8!N!-TR@dpN!8J5'9XE'mJCR*[E5"dD'8JC'&
+            dB5"QEh*V)5!pN!9Bm5f3"5")C@aXEb"QFQpY)(4SC5"bCA0[GA*MC5"QEh*V)5!
+            YN!8SI!:"#
+        });
+
+        let mut binhex_reader = EncodedBinHexReader::new(cursor);
+        let mut buf = [0; 512];
+
+        let expected = br#"$f*TEQKPH#edCA0d,R4iG!#3$L8!N!-TR@dpN!8J5'9XE'mJCR*[E5"dD'8JC'&dB5"QEh*V)5!pN!9Bm5f3"5")C@aXEb"QFQpY)(4SC5"bCA0[GA*MC5"QEh*V)5!YN!8SI!"#;
+
+        assert_eq!(binhex_reader.read(&mut buf).unwrap(), 134);
+        assert_eq!(buf[0..=134], expected[0..]);
+    }
+
+    #[test]
+    fn read_tiny_buffer() {
+        let cursor = Cursor::new(indoc! {br#"
+            (This file must be converted with BinHex 4.0)
+            :$f*TEQKPH#edCA0d,R4iG!#3$L8!N!-TR@dpN!8J5'9XE'mJCR*[E5"dD'8JC'&
+            dB5"QEh*V)5!pN!9Bm5f3"5")C@aXEb"QFQpY)(4SC5"bCA0[GA*MC5"QEh*V)5!
+            YN!8SI!:"#
+        });
+
+        let mut binhex_reader = EncodedBinHexReader::new(cursor);
+        let mut buf = [0; 1];
+        let mut accumulated_data = vec![];
+
+        while let Ok(1) = binhex_reader.read(&mut buf) {
+            accumulated_data.extend_from_slice(&buf);
+        }
+
+        assert_eq!(accumulated_data.len(), 134);
+        assert_eq!(accumulated_data.as_slice(), br#"$f*TEQKPH#edCA0d,R4iG!#3$L8!N!-TR@dpN!8J5'9XE'mJCR*[E5"dD'8JC'&dB5"QEh*V)5!pN!9Bm5f3"5")C@aXEb"QFQpY)(4SC5"bCA0[GA*MC5"QEh*V)5!YN!8SI!"#);
     }
 
     #[test]
@@ -219,13 +263,11 @@ mod tests {
             YN!8SI!:"#
         });
 
-        let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
-
+        let mut binhex_reader = EncodedBinHexReader::new(cursor);
         let mut binhex_data = vec![];
 
         assert_eq!(binhex_reader.read_to_end(&mut binhex_data).map_err(|e| e.kind()),
-                   Err(ErrorKind::InvalidData));
+                   Err(ErrorKind::UnexpectedEof));
     }
 
     #[test]
@@ -237,113 +279,44 @@ mod tests {
             YN!8SI!"#
         });
 
-        let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
-
+        let mut binhex_reader = EncodedBinHexReader::new(cursor);
         let mut binhex_data = vec![];
 
         assert_eq!(binhex_reader.read_to_end(&mut binhex_data).map_err(|e| e.kind()),
-                   Err(ErrorKind::InvalidData));
+                   Err(ErrorKind::UnexpectedEof));
     }
 
     #[test]
-    fn seek_to_banner_end() {
+    fn read_junk_before_banner() {
         let cursor = Cursor::new(indoc! {br#"
-            (This file must be converted with BinHex 4.0)
-            :great success!"#
+            (((((((((This file must be converted with BinHex 4.0)
+            :$f*TEQKPH#edCA0d,R4iG!#3$L8!N!-TR@dpN!8J5'9XE'mJCR*[E5"dD'8JC'&
+            dB5"QEh*V)5!pN!9Bm5f3"5")C@aXEb"QFQpY)(4SC5"bCA0[GA*MC5"QEh*V)5!
+            YN!8SI!:"#
         });
 
-        let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
+        let mut binhex_reader = EncodedBinHexReader::new(cursor);
+        let mut binhex_data = vec![];
 
-        binhex_reader.seek_to_banner_end().unwrap();
-
-        let mut remaining_bytes = vec![];
-        buf_reader.read_to_end(&mut remaining_bytes).unwrap();
-
-        assert_eq!(remaining_bytes, b" 4.0)\n:great success!");
+        assert_eq!(binhex_reader.read_to_end(&mut binhex_data).unwrap(), 134);
+        assert_eq!(binhex_data.as_slice(), br#"$f*TEQKPH#edCA0d,R4iG!#3$L8!N!-TR@dpN!8J5'9XE'mJCR*[E5"dD'8JC'&dB5"QEh*V)5!pN!9Bm5f3"5")C@aXEb"QFQpY)(4SC5"bCA0[GA*MC5"QEh*V)5!YN!8SI!"#);
     }
 
     #[test]
-    fn seek_to_banner_end_leading_whitespace() {
-        // Start with some leading whitespace
-        let cursor = Cursor::new(indoc! {br#"
-                  (This file must be converted with BinHex 4.0)
-            :great success!"#
-        });
-
-        let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
-
-        binhex_reader.seek_to_banner_end().unwrap();
-
-        let mut remaining_bytes = vec![];
-        buf_reader.read_to_end(&mut remaining_bytes).unwrap();
-
-        assert_eq!(remaining_bytes, b" 4.0)\n:great success!");
+    fn next_whitespace() {
+        assert_eq!(None, super::next_whitespace(b""));
+        assert_eq!(None, super::next_whitespace(b"No_whitespace_here"));
+        assert_eq!(Some(1), super::next_whitespace(b"A string with spaces"));
+        assert_eq!(Some(4), super::next_whitespace(b"Some\ttabs"));
+        assert_eq!(Some(4), super::next_whitespace(b"Some\rcarriage\rreturns"));
+        assert_eq!(Some(8), super::next_whitespace(b"Newlines\neverywhere!"));
+        assert_eq!(Some(5), super::next_whitespace(b"Check out\tthis\rmix\nof whitespace"));
     }
 
     #[test]
-    fn seek_to_banner_end_partial_match() {
-        // Start with leading whitespace and a really small BufReader capacity to ensure that
-        // we're dealing with partial matches across reads
-        let cursor = Cursor::new(indoc! {br#"
-                  (This file must be converted with BinHex 4.0)
-            :great success!"#
-        });
-
-        let mut buf_reader = BufReader::with_capacity(7, cursor);
-        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
-
-        binhex_reader.seek_to_banner_end().unwrap();
-
-        let mut remaining_bytes = vec![];
-        buf_reader.read_to_end(&mut remaining_bytes).unwrap();
-
-        assert_eq!(remaining_bytes, b" 4.0)\n:great success!");
-    }
-
-    #[test]
-    fn seek_to_banner_end_no_banner() {
-        // Start with leading whitespace and a really small BufReader capacity to ensure that
-        // we're dealing with partial matches across reads
-        let cursor = Cursor::new(br#"This is not a legit BinHex file:"#);
-
-        let mut buf_reader = BufReader::with_capacity(7, cursor);
-        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
-
-        assert_eq!(binhex_reader.seek_to_banner_end().map_err(|e| e.kind()),
-                   Err(ErrorKind::InvalidData));
-    }
-
-    #[test]
-    fn seek_to_data_start() {
-        let cursor = Cursor::new(indoc! {br#"
-            (This file must be converted with BinHex 4.0)
-            :great success!"#
-        });
-
-        let mut buf_reader = BufReader::new(cursor);
-        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
-
-        binhex_reader.seek_to_data_start().unwrap();
-
-        let mut remaining_bytes = vec![];
-        buf_reader.read_to_end(&mut remaining_bytes).unwrap();
-
-        assert_eq!(remaining_bytes, b"great success!");
-    }
-
-    #[test]
-    fn seek_to_data_start_no_delimiter() {
-        // Start with leading whitespace and a really small BufReader capacity to ensure that
-        // we're dealing with partial matches across reads
-        let cursor = Cursor::new(br#"This is not a legit BinHex file"#);
-
-        let mut buf_reader = BufReader::with_capacity(7, cursor);
-        let mut binhex_reader = EncodedBinHexReader::new(&mut buf_reader);
-
-        assert_eq!(binhex_reader.seek_to_data_start().map_err(|e| e.kind()),
-                   Err(ErrorKind::InvalidData));
+    fn next_data_byte() {
+        assert_eq!(None, super::next_data_byte(b""));
+        assert_eq!(None, super::next_data_byte(b" \r\n\t"));
+        assert_eq!(Some(4), super::next_data_byte(b"    This isn't all whitespace\r\n\t"));
     }
 }

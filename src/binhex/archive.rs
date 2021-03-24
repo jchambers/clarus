@@ -187,7 +187,6 @@ mod test {
     use std::io::Cursor;
     use indoc::indoc;
     use super::*;
-    use std::fs::File;
 
     const BINHEX_DATA: &[u8] = indoc! {br#"
             (This file must be converted with BinHex 4.0)
@@ -219,7 +218,7 @@ mod test {
     fn extract() {
         let cursor = Cursor::new(BINHEX_DATA);
 
-        let mut archive = BinHexArchive::new(cursor);
+        let archive = BinHexArchive::new(cursor);
 
         let mut data_fork = vec![];
         let mut resource_fork = vec![];
