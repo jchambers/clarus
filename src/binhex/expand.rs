@@ -68,14 +68,14 @@ impl<R: io::BufRead> io::Read for BinHexExpander<R> {
         let mut bytes_copied = 0;
 
         loop {
+            let buf = match self.source.fill_buf() {
+                Ok(buf) => buf,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+
             let event = match self.state {
                 State::Scan(_) => {
-                    let buf = match self.source.fill_buf() {
-                        Ok(buf) => buf,
-                        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(e) => return Err(e),
-                    };
-
                     if buf.is_empty() {
                         Event::SourceEmpty
                     } else {
@@ -115,12 +115,6 @@ impl<R: io::BufRead> io::Read for BinHexExpander<R> {
                     }
                 }
                 State::Escape(_) => {
-                    let buf = match self.source.fill_buf() {
-                        Ok(buf) => buf,
-                        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(e) => return Err(e),
-                    };
-
                     if buf.is_empty() {
                         Event::SourceEmpty
                     } else {
@@ -147,10 +141,7 @@ impl<R: io::BufRead> io::Read for BinHexExpander<R> {
                 State::Expand(byte, run_length) => {
                     let capacity = cmp::min(run_length, dest.len() - bytes_copied);
 
-                    for b in dest.iter_mut().skip(bytes_copied).take(capacity) {
-                        *b = byte;
-                    }
-
+                    dest[bytes_copied..bytes_copied + capacity].fill(byte);
                     bytes_copied += capacity;
 
                     Event::CopiedBytes(capacity, byte)
