@@ -1,14 +1,14 @@
 use std::convert::{TryFrom, TryInto};
+use std::hash::Hasher;
 use std::io::{BufRead, BufReader, Read, Error, ErrorKind, Write};
+use std::ops::Deref;
+
 use super::expand::BinHexExpander;
 use super::read::EncodedBinHexReader;
+
+use crc16::{State, XMODEM};
 use radix64::CustomConfig;
 use radix64::io::DecodeReader;
-use std::ops::Deref;
-use std::cmp;
-use crc16::{State, XMODEM};
-
-const COPY_BUFFER_LENGTH: usize = 1024;
 
 lazy_static::lazy_static! {
     static ref BINHEX_CONFIG: CustomConfig = CustomConfig::with_alphabet(
@@ -28,15 +28,55 @@ pub struct BinHexHeader {
     resource_fork_length: usize,
 }
 
-pub struct BinHexArchive<S: BufRead> {
-    source: BinHexExpander<BufReader<DecodeReader<&'static CustomConfig, EncodedBinHexReader<S>>>>,
+pub struct BinHexArchive<R: BufRead> {
+    source: BinHexExpander<BufReader<DecodeReader<&'static CustomConfig, EncodedBinHexReader<R>>>>,
 
     header: Option<BinHexHeader>,
 }
 
-impl<S: BufRead> BinHexArchive<S> {
+struct ForkReader<'a, R: Read> {
+    source: &'a mut R,
+    len: usize,
+    bytes_read: usize,
+    crc: State<XMODEM>,
+}
 
-    pub fn new(source: S) -> Self {
+impl<'a, R: Read> ForkReader<'a, R> {
+    fn new(source: &'a mut R, len: usize) -> Self {
+        ForkReader { source, len, bytes_read: 0, crc: State::<XMODEM>::new() }
+    }
+
+    fn checksum(&self) -> u16 {
+        debug_assert!(self.bytes_read == self.len);
+        self.crc.get()
+    }
+}
+
+impl<'a, R: Read> Read for ForkReader<'a, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() || self.bytes_read == self.len {
+            Ok(0)
+        } else {
+            let remaining_bytes = self.len - self.bytes_read;
+
+            let bytes_copied = if buf.len() <= remaining_bytes {
+                self.source.read(buf)?
+            } else {
+                self.source.read_exact(&mut buf[..remaining_bytes])?;
+                remaining_bytes
+            };
+
+            self.crc.write(&buf[..bytes_copied]);
+            self.bytes_read += bytes_copied;
+
+            Ok(bytes_copied)
+        }
+    }
+}
+
+impl<R: BufRead> BinHexArchive<R> {
+
+    pub fn new(source: R) -> Self {
         let encoded_reader = EncodedBinHexReader::new(source);
         let decoder = DecodeReader::new(BINHEX_CONFIG.deref(), encoded_reader);
         let buf_decoder = BufReader::new(decoder);
@@ -74,64 +114,38 @@ impl<S: BufRead> BinHexArchive<S> {
         Ok(header)
     }
 
-    pub fn extract<D: Write, Z: Write>(mut self, data_writer: &mut D, resource_writer: &mut Z)
+    pub fn extract(mut self, data_writer: &mut impl Write, resource_writer: &mut impl Write)
         -> std::io::Result<()> {
 
         let header = self.header()?;
 
-        let data_hash = Self::copy_and_checksum(&mut self.source, data_writer, header.data_fork_length)?;
-
-        let data_checksum = {
-            let mut data_checksum_bytes = [0; 2];
-            self.source.read_exact(&mut data_checksum_bytes)?;
-
-            u16::from_be_bytes(data_checksum_bytes)
-        };
-
-        if data_checksum != data_hash {
-            return Err(Error::new(ErrorKind::InvalidData,
-                                  format!("Data fork checksum failed; expected {:04x}, calculated {:04x}",
-                                          data_checksum, data_hash)));
-        }
-
-        let resource_hash = Self::copy_and_checksum(&mut self.source, resource_writer, header.resource_fork_length)?;
-
-        let resource_checksum = {
-            let mut resource_checksum_bytes = [0; 2];
-            self.source.read_exact(&mut resource_checksum_bytes)?;
-
-            u16::from_be_bytes(resource_checksum_bytes)
-        };
-
-        if resource_checksum != resource_hash {
-            return Err(Error::new(ErrorKind::InvalidData,
-                                  format!("Resource fork checksum failed; expected {:04x}, calculated {:04x}",
-                                          resource_checksum, resource_hash)));
-        }
+        self.copy_fork(data_writer, header.data_fork_length)?;
+        self.copy_fork(resource_writer, header.resource_fork_length)?;
 
         Ok(())
     }
 
-    fn copy_and_checksum<R: Read, W: Write>(src: &mut R, dest: &mut W, len: usize)
-        -> std::io::Result<u16> {
+    fn copy_fork(&mut self, dest: &mut impl Write, len: usize) -> std::io::Result<()> {
+        let (bytes_copied, calculated_checksum) = {
+            let mut fork_reader = ForkReader::new(&mut self.source, len);
+            (std::io::copy(&mut fork_reader, dest)?, fork_reader.checksum())
+        };
 
-        let mut buf = [0; COPY_BUFFER_LENGTH];
-        let mut bytes_copied = 0;
+        debug_assert!(bytes_copied == len as u64);
 
-        let mut crc = State::<XMODEM>::new();
+        let provided_checksum = {
+            let mut checksum_bytes = [0; 2];
+            self.source.read_exact(&mut checksum_bytes)?;
 
-        loop {
-            let capacity = cmp::min(len - bytes_copied, buf.len());
-            let bytes_read = src.read(&mut buf[..capacity])?;
+            u16::from_be_bytes(checksum_bytes)
+        };
 
-            dest.write_all(&buf[..bytes_read])?;
-            crc.update(&buf[..bytes_read]);
-
-            bytes_copied += bytes_read;
-
-            if bytes_copied == len {
-                break Ok(crc.get());
-            }
+        if provided_checksum == calculated_checksum {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::InvalidData,
+                                  format!("Data fork checksum failed; expected {:04x}, calculated {:04x}",
+                                          provided_checksum, calculated_checksum)))
         }
     }
 }
@@ -200,9 +214,7 @@ mod test {
 
     #[test]
     fn read_header() {
-        let cursor = Cursor::new(BINHEX_DATA);
-
-        let mut archive = BinHexArchive::new(cursor);
+        let mut archive = BinHexArchive::new(Cursor::new(BINHEX_DATA));
 
         let header = archive.read_header().unwrap();
 
