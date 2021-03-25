@@ -1,14 +1,14 @@
 use std::convert::{TryFrom, TryInto};
 use std::hash::Hasher;
-use std::io::{BufRead, BufReader, Read, Error, ErrorKind, Write};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
 use std::ops::Deref;
 
 use super::expand::BinHexExpander;
 use super::read::EncodedBinHexReader;
 
 use crc16::{State, XMODEM};
-use radix64::CustomConfig;
 use radix64::io::DecodeReader;
+use radix64::CustomConfig;
 
 lazy_static::lazy_static! {
     static ref BINHEX_CONFIG: CustomConfig = CustomConfig::with_alphabet(
@@ -43,7 +43,12 @@ struct ForkReader<'a, R: Read> {
 
 impl<'a, R: Read> ForkReader<'a, R> {
     fn new(source: &'a mut R, len: usize) -> Self {
-        ForkReader { source, len, bytes_read: 0, crc: State::<XMODEM>::new() }
+        ForkReader {
+            source,
+            len,
+            bytes_read: 0,
+            crc: State::<XMODEM>::new(),
+        }
     }
 
     fn checksum(&self) -> u16 {
@@ -75,14 +80,16 @@ impl<'a, R: Read> Read for ForkReader<'a, R> {
 }
 
 impl<R: BufRead> BinHexArchive<R> {
-
     pub fn new(source: R) -> Self {
         let encoded_reader = EncodedBinHexReader::new(source);
         let decoder = DecodeReader::new(BINHEX_CONFIG.deref(), encoded_reader);
         let buf_decoder = BufReader::new(decoder);
         let expander = BinHexExpander::new(buf_decoder);
 
-        BinHexArchive { source: expander, header: None }
+        BinHexArchive {
+            source: expander,
+            header: None,
+        }
     }
 
     pub fn header(&mut self) -> std::io::Result<BinHexHeader> {
@@ -106,7 +113,8 @@ impl<R: BufRead> BinHexArchive<R> {
         let name_length = header_bytes[0] as usize;
 
         header_bytes.resize(header_bytes.len() + name_length, 0);
-        self.source.read_exact(&mut header_bytes.as_mut_slice()[22..])?;
+        self.source
+            .read_exact(&mut header_bytes.as_mut_slice()[22..])?;
 
         let header = BinHexHeader::try_from(header_bytes)?;
         self.header = Some(header.clone());
@@ -114,9 +122,11 @@ impl<R: BufRead> BinHexArchive<R> {
         Ok(header)
     }
 
-    pub fn extract(mut self, data_writer: &mut impl Write, resource_writer: &mut impl Write)
-        -> std::io::Result<()> {
-
+    pub fn extract(
+        mut self,
+        data_writer: &mut impl Write,
+        resource_writer: &mut impl Write,
+    ) -> std::io::Result<()> {
         let header = self.header()?;
 
         self.copy_fork(data_writer, header.data_fork_length)?;
@@ -128,7 +138,10 @@ impl<R: BufRead> BinHexArchive<R> {
     fn copy_fork(&mut self, dest: &mut impl Write, len: usize) -> std::io::Result<()> {
         let (bytes_copied, calculated_checksum) = {
             let mut fork_reader = ForkReader::new(&mut self.source, len);
-            (std::io::copy(&mut fork_reader, dest)?, fork_reader.checksum())
+            (
+                std::io::copy(&mut fork_reader, dest)?,
+                fork_reader.checksum(),
+            )
         };
 
         debug_assert!(bytes_copied == len as u64);
@@ -143,9 +156,13 @@ impl<R: BufRead> BinHexArchive<R> {
         if provided_checksum == calculated_checksum {
             Ok(())
         } else {
-            Err(Error::new(ErrorKind::InvalidData,
-                                  format!("Data fork checksum failed; expected {:04x}, calculated {:04x}",
-                                          provided_checksum, calculated_checksum)))
+            Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Data fork checksum failed; expected {:04x}, calculated {:04x}",
+                    provided_checksum, calculated_checksum
+                ),
+            ))
         }
     }
 }
@@ -154,14 +171,18 @@ impl TryFrom<Vec<u8>> for BinHexHeader {
     type Error = std::io::Error;
 
     fn try_from(header_bytes: Vec<u8>) -> Result<Self, Self::Error> {
-
         let (name_length_bytes, remaining_bytes) = header_bytes.split_at(1);
         let name_length = name_length_bytes[0] as usize;
 
         if header_bytes.len() != name_length + 22 {
-            return Err(Error::new(ErrorKind::InvalidInput,
-                                  format!("Expected at least {} header bytes, but only found {}",
-                                          name_length + 22, header_bytes.len())));
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "Expected at least {} header bytes, but only found {}",
+                    name_length + 22,
+                    header_bytes.len()
+                ),
+            ));
         }
 
         let (name_bytes, remaining_bytes) = remaining_bytes.split_at(name_length);
@@ -175,13 +196,18 @@ impl TryFrom<Vec<u8>> for BinHexHeader {
 
         debug_assert!(remaining_bytes.is_empty());
 
-        let hash = crc16::State::<crc16::XMODEM>::calculate(&header_bytes[..header_bytes.len() - 2]);
+        let hash =
+            crc16::State::<crc16::XMODEM>::calculate(&header_bytes[..header_bytes.len() - 2]);
         let checksum = u16::from_be_bytes(checksum_bytes.try_into().unwrap());
 
         if checksum != hash {
-            return Err(Error::new(ErrorKind::InvalidData,
-                                  format!("Header checksum failed; expected {:04x}, calculated {:04x}",
-                                          checksum, hash)));
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Header checksum failed; expected {:04x}, calculated {:04x}",
+                    checksum, hash
+                ),
+            ));
         }
 
         let (name_cow, _, _) = encoding_rs::MACINTOSH.decode(name_bytes);
@@ -189,25 +215,34 @@ impl TryFrom<Vec<u8>> for BinHexHeader {
         let file_type: [u8; 4] = TryInto::<[u8; 4]>::try_into(file_type_bytes).unwrap();
         let creator: [u8; 4] = TryInto::<[u8; 4]>::try_into(creator_bytes).unwrap();
         let flag: u16 = u16::from_be_bytes(flag_bytes.try_into().unwrap());
-        let data_fork_length: usize = u32::from_be_bytes(data_fork_length_bytes.try_into().unwrap()) as usize;
-        let resource_fork_length: usize = u32::from_be_bytes(resource_fork_length_bytes.try_into().unwrap()) as usize;
+        let data_fork_length: usize =
+            u32::from_be_bytes(data_fork_length_bytes.try_into().unwrap()) as usize;
+        let resource_fork_length: usize =
+            u32::from_be_bytes(resource_fork_length_bytes.try_into().unwrap()) as usize;
 
-        Ok(BinHexHeader { name, file_type, creator, flag, data_fork_length, resource_fork_length })
+        Ok(BinHexHeader {
+            name,
+            file_type,
+            creator,
+            flag,
+            data_fork_length,
+            resource_fork_length,
+        })
     }
 }
 
 #[cfg(test)]
 mod test {
-    use std::io::Cursor;
-    use indoc::indoc;
     use super::*;
+    use indoc::indoc;
+    use std::io::Cursor;
 
     const BINHEX_DATA: &[u8] = indoc! {br#"
             (This file must be converted with BinHex 4.0)
             :$f*TEQKPH#edCA0d,R4iG!#3$L8!N!-TR@dpN!8J5'9XE'mJCR*[E5"dD'8JC'&
             dB5"QEh*V)5!pN!9Bm5f3"5")C@aXEb"QFQpY)(4SC5"bCA0[GA*MC5"QEh*V)5!
             YN!8SI!:"#
-        };
+    };
 
     const DATA_FORK: &[u8] = b"===== Hello from the data fork! =====";
     const RESOURCE_FORK: &[u8] = b"----- Hello from the resource fork! -----";

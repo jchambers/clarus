@@ -49,14 +49,15 @@ impl State {
             (State::FindDataStart, Event::FoundDataStart) => Ok(State::ReadData),
             (State::ReadData, Event::ConsumedBytes) => Ok(State::ReadData),
             (State::ReadData, Event::FoundDataEnd) => Ok(State::Done),
-            _ => Err(Error::new(ErrorKind::InvalidData,
-                                format!("Illegal state transition from {:?} with {:?}", self, event))),
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Illegal state transition from {:?} with {:?}", self, event),
+            )),
         }
     }
 }
 
 impl<R: Read> EncodedBinHexReader<R> {
-
     pub fn new(source: R) -> Self {
         EncodedBinHexReader {
             source,
@@ -100,9 +101,11 @@ impl<R: Read> Read for EncodedBinHexReader<R> {
                         }
                     }
                     State::PartialBannerMatch(matched) => {
-                        let check_len = cmp::min(bytes_read - bytes_consumed, BANNER.len() - matched);
+                        let check_len =
+                            cmp::min(bytes_read - bytes_consumed, BANNER.len() - matched);
 
-                        if buf[bytes_consumed..].starts_with(&BANNER[matched..matched + check_len]) {
+                        if buf[bytes_consumed..].starts_with(&BANNER[matched..matched + check_len])
+                        {
                             bytes_consumed += check_len;
                             Event::MatchedBannerBytes(check_len)
                         } else {
@@ -121,36 +124,36 @@ impl<R: Read> Read for EncodedBinHexReader<R> {
                             }
                         }
                     }
-                    State::ReadData => {
-                        match next_data_byte(&buf[bytes_consumed..bytes_read]) {
-                            Some(start) => {
-                                let data_bytes =
-                                    compact(&mut buf[bytes_consumed + start..bytes_read]);
+                    State::ReadData => match next_data_byte(&buf[bytes_consumed..bytes_read]) {
+                        Some(start) => {
+                            let data_bytes = compact(&mut buf[bytes_consumed + start..bytes_read]);
 
-                                if bytes_consumed + start > 0 {
-                                    buf.copy_within(bytes_consumed + start..bytes_consumed + start + data_bytes, 0);
-                                }
-
-                                match memchr::memchr(DATA_DELIMITER, &buf[..data_bytes]) {
-                                    Some(data_end) => {
-                                        bytes_copied += data_end;
-
-                                        Event::FoundDataEnd
-                                    }
-                                    None => {
-                                        bytes_consumed = bytes_read;
-                                        bytes_copied += data_bytes;
-
-                                        Event::ConsumedBytes
-                                    }
-                                }
+                            if bytes_consumed + start > 0 {
+                                buf.copy_within(
+                                    bytes_consumed + start..bytes_consumed + start + data_bytes,
+                                    0,
+                                );
                             }
-                            None => {
-                                bytes_consumed = bytes_read;
-                                Event::ConsumedBytes
+
+                            match memchr::memchr(DATA_DELIMITER, &buf[..data_bytes]) {
+                                Some(data_end) => {
+                                    bytes_copied += data_end;
+
+                                    Event::FoundDataEnd
+                                }
+                                None => {
+                                    bytes_consumed = bytes_read;
+                                    bytes_copied += data_bytes;
+
+                                    Event::ConsumedBytes
+                                }
                             }
                         }
-                    }
+                        None => {
+                            bytes_consumed = bytes_read;
+                            Event::ConsumedBytes
+                        }
+                    },
                     State::Done => {
                         return Ok(bytes_copied);
                     }
@@ -165,8 +168,10 @@ impl<R: Read> Read for EncodedBinHexReader<R> {
 }
 
 fn next_whitespace(bytes: &[u8]) -> Option<usize> {
-    match (memchr::memchr(b' ', bytes),
-           memchr::memchr3(b'\t', b'\r', b'\n', bytes)) {
+    match (
+        memchr::memchr(b' ', bytes),
+        memchr::memchr3(b'\t', b'\r', b'\n', bytes),
+    ) {
         (Some(a), Some(b)) => Some(cmp::min(a, b)),
         (a, b) => a.or(b),
     }
@@ -176,9 +181,7 @@ fn next_data_byte(bytes: &[u8]) -> Option<usize> {
     if bytes.is_empty() {
         None
     } else {
-        let leading_whitespace_bytes = bytes.iter()
-            .take_while(|b| b" \t\r\n".contains(b))
-            .count();
+        let leading_whitespace_bytes = bytes.iter().take_while(|b| b" \t\r\n".contains(b)).count();
 
         if leading_whitespace_bytes == bytes.len() {
             None
@@ -282,8 +285,12 @@ mod tests {
         let mut binhex_reader = EncodedBinHexReader::new(cursor);
         let mut binhex_data = vec![];
 
-        assert_eq!(binhex_reader.read_to_end(&mut binhex_data).map_err(|e| e.kind()),
-                   Err(ErrorKind::UnexpectedEof));
+        assert_eq!(
+            binhex_reader
+                .read_to_end(&mut binhex_data)
+                .map_err(|e| e.kind()),
+            Err(ErrorKind::UnexpectedEof)
+        );
     }
 
     #[test]
@@ -298,8 +305,12 @@ mod tests {
         let mut binhex_reader = EncodedBinHexReader::new(cursor);
         let mut binhex_data = vec![];
 
-        assert_eq!(binhex_reader.read_to_end(&mut binhex_data).map_err(|e| e.kind()),
-                   Err(ErrorKind::UnexpectedEof));
+        assert_eq!(
+            binhex_reader
+                .read_to_end(&mut binhex_data)
+                .map_err(|e| e.kind()),
+            Err(ErrorKind::UnexpectedEof)
+        );
     }
 
     #[test]
@@ -326,14 +337,20 @@ mod tests {
         assert_eq!(Some(4), super::next_whitespace(b"Some\ttabs"));
         assert_eq!(Some(4), super::next_whitespace(b"Some\rcarriage\rreturns"));
         assert_eq!(Some(8), super::next_whitespace(b"Newlines\neverywhere!"));
-        assert_eq!(Some(5), super::next_whitespace(b"Check out\tthis\rmix\nof whitespace"));
+        assert_eq!(
+            Some(5),
+            super::next_whitespace(b"Check out\tthis\rmix\nof whitespace")
+        );
     }
 
     #[test]
     fn next_data_byte() {
         assert_eq!(None, super::next_data_byte(b""));
         assert_eq!(None, super::next_data_byte(b" \r\n\t"));
-        assert_eq!(Some(4), super::next_data_byte(b"    This isn't all whitespace\r\n\t"));
+        assert_eq!(
+            Some(4),
+            super::next_data_byte(b"    This isn't all whitespace\r\n\t")
+        );
     }
 
     #[test]

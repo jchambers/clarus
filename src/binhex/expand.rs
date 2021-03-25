@@ -47,7 +47,10 @@ impl State {
                     Ok(State::Scan(None))
                 }
             }
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Illegal state transition")),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Illegal state transition",
+            )),
         }
     }
 }
@@ -59,7 +62,10 @@ pub struct BinHexExpander<R: io::BufRead> {
 
 impl<R: io::BufRead> BinHexExpander<R> {
     pub fn new(source: R) -> Self {
-        BinHexExpander { source, state: State::Scan(None) }
+        BinHexExpander {
+            source,
+            state: State::Scan(None),
+        }
     }
 }
 
@@ -90,8 +96,7 @@ impl<R: io::BufRead> io::Read for BinHexExpander<R> {
                                 Event::FoundEscape
                             }
                             Some(pos) => {
-                                dest[bytes_copied..bytes_copied + pos]
-                                    .copy_from_slice(&buf[..pos]);
+                                dest[bytes_copied..bytes_copied + pos].copy_from_slice(&buf[..pos]);
 
                                 let last_byte = buf[pos - 1];
 
@@ -162,13 +167,14 @@ impl<R: io::BufRead> io::Read for BinHexExpander<R> {
 
 #[cfg(test)]
 mod test {
-    use std::io;
     use super::*;
+    use std::io;
     use std::io::Read;
 
     #[test]
     fn expand_no_escapes() {
-        let mut cursor = io::Cursor::new([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let mut cursor =
+            io::Cursor::new([0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]);
         let mut expander = BinHexExpander::new(&mut cursor);
 
         let mut buf = [0; 4];
@@ -245,7 +251,6 @@ mod test {
 
     #[test]
     fn expand_cancelled_escape_rle() {
-        // 2B90009005
         let mut cursor = io::Cursor::new([0x2b, 0x90, 0x00, 0x90, 0x05]);
         let mut expander = BinHexExpander::new(&mut cursor);
 
