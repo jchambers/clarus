@@ -189,21 +189,25 @@ fn next_data_byte(bytes: &[u8]) -> Option<usize> {
 }
 
 fn compact(bytes: &mut [u8]) -> usize {
-    let mut whitespace_removed = 0;
+    let mut scan = 0;
+    let mut bytes_written = 0;
 
-    while let Some(start) = next_whitespace(&bytes[..bytes.len() - whitespace_removed]) {
-        match next_data_byte(&bytes[start..bytes.len() - whitespace_removed]) {
-            Some(len) => {
-                whitespace_removed += len;
-                bytes.copy_within(start + len.., start);
-            }
-            None => {
-                whitespace_removed += bytes.len() - whitespace_removed - start;
-            }
-        }
+    while let Some(start_offset) = next_data_byte(&bytes[scan..]) {
+        let chunk_start = scan + start_offset;
+
+        let chunk_end = next_whitespace(&bytes[chunk_start..])
+            .map(|whitespace_offset| chunk_start + whitespace_offset)
+            .unwrap_or_else(|| bytes.len());
+
+        bytes.copy_within(chunk_start..chunk_end, bytes_written);
+
+        let len = chunk_end - chunk_start;
+
+        bytes_written += len;
+        scan += start_offset + len;
     }
 
-    bytes.len() - whitespace_removed
+    bytes_written
 }
 
 #[cfg(test)]
