@@ -1,3 +1,4 @@
+use std::io::{BufRead, BufReader};
 use std::{cmp, io};
 
 const RLE_ESCAPE: u8 = 0x90;
@@ -55,21 +56,21 @@ impl State {
     }
 }
 
-pub struct BinHexExpander<R: io::BufRead> {
-    source: R,
+pub struct BinHexExpander<R: io::Read> {
+    source: BufReader<R>,
     state: State,
 }
 
-impl<R: io::BufRead> BinHexExpander<R> {
+impl<R: io::Read> BinHexExpander<R> {
     pub fn new(source: R) -> Self {
         BinHexExpander {
-            source,
+            source: BufReader::new(source),
             state: State::Scan(None),
         }
     }
 }
 
-impl<R: io::BufRead> io::Read for BinHexExpander<R> {
+impl<R: io::Read> io::Read for BinHexExpander<R> {
     fn read(&mut self, dest: &mut [u8]) -> io::Result<usize> {
         let mut bytes_copied = 0;
 

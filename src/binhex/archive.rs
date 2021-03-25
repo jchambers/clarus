@@ -1,6 +1,6 @@
 use std::convert::{TryFrom, TryInto};
 use std::hash::Hasher;
-use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
+use std::io::{Error, ErrorKind, Read, Write};
 use std::ops::Deref;
 
 use super::expand::BinHexExpander;
@@ -28,8 +28,8 @@ pub struct BinHexHeader {
     resource_fork_length: usize,
 }
 
-pub struct BinHexArchive<R: BufRead> {
-    source: BinHexExpander<BufReader<DecodeReader<&'static CustomConfig, EncodedBinHexReader<R>>>>,
+pub struct BinHexArchive<R: Read> {
+    source: BinHexExpander<DecodeReader<&'static CustomConfig, EncodedBinHexReader<R>>>,
 
     header: Option<BinHexHeader>,
 }
@@ -79,12 +79,11 @@ impl<'a, R: Read> Read for ForkReader<'a, R> {
     }
 }
 
-impl<R: BufRead> BinHexArchive<R> {
+impl<R: Read> BinHexArchive<R> {
     pub fn new(source: R) -> Self {
-        let encoded_reader = EncodedBinHexReader::new(source);
-        let decoder = DecodeReader::new(BINHEX_CONFIG.deref(), encoded_reader);
-        let buf_decoder = BufReader::new(decoder);
-        let expander = BinHexExpander::new(buf_decoder);
+        let reader = EncodedBinHexReader::new(source);
+        let decoder = DecodeReader::new(BINHEX_CONFIG.deref(), reader);
+        let expander = BinHexExpander::new(decoder);
 
         BinHexArchive {
             source: expander,
