@@ -1,6 +1,8 @@
 use std::convert::{TryFrom, TryInto};
+use std::error;
+use std::fmt::{self, Display, Formatter};
 use std::hash::Hasher;
-use std::io::{self, Error, ErrorKind, Read, Write};
+use std::io::{self, Read, Write};
 use std::ops::Deref;
 
 use super::expand::BinHexExpander;
@@ -30,8 +32,22 @@ pub struct BinHexHeader {
 
 pub struct BinHexArchive<R: Read> {
     source: BinHexExpander<DecodeReader<&'static CustomConfig, EncodedBinHexReader<R>>>,
-
     header: Option<BinHexHeader>,
+}
+
+#[derive(Debug)]
+pub enum BinHexError {
+    IoError(io::Error),
+    InvalidHeader,
+    InvalidData,
+    InvalidChecksum(ArchiveSection, u16, u16),
+}
+
+#[derive(Debug)]
+pub enum ArchiveSection {
+    Header,
+    DataFork,
+    ResourceFork,
 }
 
 struct ForkReader<'a, R: Read> {
@@ -39,6 +55,36 @@ struct ForkReader<'a, R: Read> {
     len: usize,
     bytes_read: usize,
     crc: State<XMODEM>,
+}
+
+impl Display for BinHexError {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            BinHexError::IoError(source) => write!(fmt, "IO error: {}", source),
+            BinHexError::InvalidHeader => write!(fmt, "Malformed BinHex header"),
+            BinHexError::InvalidData => write!(fmt, "Malformed BinHex data"),
+            BinHexError::InvalidChecksum(section, provided, calculated) => write!(
+                fmt,
+                "Invalid checksum; section={:?}, expected={:04x}, calculated={:04x}",
+                section, provided, calculated
+            ),
+        }
+    }
+}
+
+impl From<io::Error> for BinHexError {
+    fn from(error: io::Error) -> Self {
+        BinHexError::IoError(error)
+    }
+}
+
+impl error::Error for BinHexError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            BinHexError::IoError(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 impl<'a, R: Read> ForkReader<'a, R> {
@@ -91,14 +137,14 @@ impl<R: Read> BinHexArchive<R> {
         }
     }
 
-    pub fn header(&mut self) -> io::Result<BinHexHeader> {
+    pub fn header(&mut self) -> Result<BinHexHeader, BinHexError> {
         match &self.header {
             Some(header) => Ok(header.clone()),
             None => self.read_header(),
         }
     }
 
-    fn read_header(&mut self) -> io::Result<BinHexHeader> {
+    fn read_header(&mut self) -> Result<BinHexHeader, BinHexError> {
         debug_assert!(self.header.is_none());
 
         // Headers have a minimum size of 22 bytes (assuming a zero-length name) and a maximum size
@@ -125,16 +171,30 @@ impl<R: Read> BinHexArchive<R> {
         mut self,
         data_writer: &mut impl Write,
         resource_writer: &mut impl Write,
-    ) -> io::Result<()> {
+    ) -> Result<(), BinHexError> {
         let header = self.header()?;
 
-        self.copy_fork(data_writer, header.data_fork_length)?;
-        self.copy_fork(resource_writer, header.resource_fork_length)?;
+        self.copy_fork(
+            ArchiveSection::DataFork,
+            data_writer,
+            header.data_fork_length,
+        )?;
+
+        self.copy_fork(
+            ArchiveSection::ResourceFork,
+            resource_writer,
+            header.resource_fork_length,
+        )?;
 
         Ok(())
     }
 
-    fn copy_fork(&mut self, dest: &mut impl Write, len: usize) -> io::Result<()> {
+    fn copy_fork(
+        &mut self,
+        section: ArchiveSection,
+        dest: &mut impl Write,
+        len: usize,
+    ) -> Result<(), BinHexError> {
         let (bytes_copied, calculated_checksum) = {
             let mut fork_reader = ForkReader::new(&mut self.source, len);
             (io::copy(&mut fork_reader, dest)?, fork_reader.checksum())
@@ -152,33 +212,24 @@ impl<R: Read> BinHexArchive<R> {
         if provided_checksum == calculated_checksum {
             Ok(())
         } else {
-            Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "Data fork checksum failed; expected {:04x}, calculated {:04x}",
-                    provided_checksum, calculated_checksum
-                ),
+            Err(BinHexError::InvalidChecksum(
+                section,
+                provided_checksum,
+                calculated_checksum,
             ))
         }
     }
 }
 
 impl TryFrom<Vec<u8>> for BinHexHeader {
-    type Error = io::Error;
+    type Error = BinHexError;
 
     fn try_from(header_bytes: Vec<u8>) -> Result<Self, Self::Error> {
         let (name_length_bytes, remaining_bytes) = header_bytes.split_at(1);
         let name_length = name_length_bytes[0] as usize;
 
         if header_bytes.len() != name_length + 22 {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "Expected at least {} header bytes, but only found {}",
-                    name_length + 22,
-                    header_bytes.len()
-                ),
-            ));
+            return Err(BinHexError::InvalidHeader);
         }
 
         let (name_bytes, remaining_bytes) = remaining_bytes.split_at(name_length);
@@ -192,17 +243,15 @@ impl TryFrom<Vec<u8>> for BinHexHeader {
 
         debug_assert!(remaining_bytes.is_empty());
 
-        let hash =
+        let calculated_checksum =
             crc16::State::<crc16::XMODEM>::calculate(&header_bytes[..header_bytes.len() - 2]);
-        let checksum = u16::from_be_bytes(checksum_bytes.try_into().unwrap());
+        let provided_checksum = u16::from_be_bytes(checksum_bytes.try_into().unwrap());
 
-        if checksum != hash {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "Header checksum failed; expected {:04x}, calculated {:04x}",
-                    checksum, hash
-                ),
+        if provided_checksum != calculated_checksum {
+            return Err(BinHexError::InvalidChecksum(
+                ArchiveSection::Header,
+                provided_checksum,
+                calculated_checksum,
             ));
         }
 
