@@ -1,5 +1,5 @@
-use std::io::{BufRead, BufReader};
-use std::{cmp, io};
+use std::cmp;
+use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result};
 
 const RLE_ESCAPE: u8 = 0x90;
 const CANCEL_ESCAPE: u8 = 0x00;
@@ -28,40 +28,41 @@ enum Event {
 }
 
 impl State {
-    fn advance(&self, event: Event) -> io::Result<Self> {
-        match (self, event) {
-            (State::Scan(_), Event::CopiedBytes(_, last_byte)) => Ok(State::Scan(Some(last_byte))),
+    fn advance(&self, event: Event) -> Result<Self> {
+        match (self, &event) {
+            (State::Scan(_), Event::CopiedBytes(_, last_byte)) => Ok(State::Scan(Some(*last_byte))),
             (State::Scan(expandable_byte), Event::FoundEscape) => {
                 Ok(State::Escape(*expandable_byte))
             }
             (State::Scan(_), Event::SourceEmpty) => Ok(State::Done),
             (State::Escape(_), Event::CopiedBytes(_, last_byte)) => {
-                Ok(State::Scan(Some(last_byte)))
+                Ok(State::Scan(Some(*last_byte)))
             }
             (State::Escape(Some(expandable_byte)), Event::FoundRunLength(run_length)) => {
-                Ok(State::Expand(*expandable_byte, run_length))
+                Ok(State::Expand(*expandable_byte, *run_length))
             }
+            (State::Escape(_), Event::SourceEmpty) => Err(Error::new(
+                ErrorKind::InvalidData,
+                "Stream ended with unresolved RLE escape",
+            )),
             (State::Expand(byte, run_length), Event::CopiedBytes(bytes_copied, _)) => {
-                if bytes_copied < *run_length {
+                if bytes_copied < run_length {
                     Ok(State::Expand(*byte, run_length - bytes_copied))
                 } else {
                     Ok(State::Scan(None))
                 }
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Illegal state transition",
-            )),
+            _ => panic!("Invalid state transition from {:?} via {:?}", self, event),
         }
     }
 }
 
-pub struct BinHexExpander<R: io::Read> {
+pub struct BinHexExpander<R: Read> {
     source: BufReader<R>,
     state: State,
 }
 
-impl<R: io::Read> BinHexExpander<R> {
+impl<R: Read> BinHexExpander<R> {
     pub fn new(source: R) -> Self {
         BinHexExpander {
             source: BufReader::new(source),
@@ -70,14 +71,14 @@ impl<R: io::Read> BinHexExpander<R> {
     }
 }
 
-impl<R: io::Read> io::Read for BinHexExpander<R> {
-    fn read(&mut self, dest: &mut [u8]) -> io::Result<usize> {
+impl<R: Read> Read for BinHexExpander<R> {
+    fn read(&mut self, dest: &mut [u8]) -> Result<usize> {
         let mut bytes_copied = 0;
 
         loop {
             let buf = match self.source.fill_buf() {
                 Ok(buf) => buf,
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             };
 
@@ -169,13 +170,11 @@ impl<R: io::Read> io::Read for BinHexExpander<R> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::io;
-    use std::io::Read;
+    use std::io::{Cursor, Read};
 
     #[test]
     fn expand_no_escapes() {
-        let mut cursor =
-            io::Cursor::new([0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]);
+        let mut cursor = Cursor::new([0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]);
         let mut expander = BinHexExpander::new(&mut cursor);
 
         let mut buf = [0; 4];
@@ -192,7 +191,7 @@ mod test {
 
     #[test]
     fn expand_cancelled_escape_at_end() {
-        let mut cursor = io::Cursor::new([0x2b, 0x90, 0x00]);
+        let mut cursor = Cursor::new([0x2b, 0x90, 0x00]);
         let mut expander = BinHexExpander::new(&mut cursor);
 
         let mut buf = [0; 4];
@@ -203,7 +202,7 @@ mod test {
 
     #[test]
     fn expand_cancelled_escape_in_stream() {
-        let mut cursor = io::Cursor::new([0x2b, 0x90, 0x00, 0x14]);
+        let mut cursor = Cursor::new([0x2b, 0x90, 0x00, 0x14]);
         let mut expander = BinHexExpander::new(&mut cursor);
 
         let mut buf = [0; 4];
@@ -214,7 +213,7 @@ mod test {
 
     #[test]
     fn expand_rle_at_end() {
-        let mut cursor = io::Cursor::new([0xff, 0x90, 0x04]);
+        let mut cursor = Cursor::new([0xff, 0x90, 0x04]);
         let mut expander = BinHexExpander::new(&mut cursor);
 
         let mut buf = [0; 8];
@@ -225,7 +224,7 @@ mod test {
 
     #[test]
     fn expand_rle_multiple_reads() {
-        let mut cursor = io::Cursor::new([0xff, 0x90, 0x04]);
+        let mut cursor = Cursor::new([0xff, 0x90, 0x04]);
         let mut expander = BinHexExpander::new(&mut cursor);
 
         let mut buf = [0; 2];
@@ -241,7 +240,7 @@ mod test {
 
     #[test]
     fn expand_rle_in_stream() {
-        let mut cursor = io::Cursor::new([0xff, 0x90, 0x04, 0x2b]);
+        let mut cursor = Cursor::new([0xff, 0x90, 0x04, 0x2b]);
         let mut expander = BinHexExpander::new(&mut cursor);
 
         let mut buf = [0; 8];
@@ -252,7 +251,7 @@ mod test {
 
     #[test]
     fn expand_cancelled_escape_rle() {
-        let mut cursor = io::Cursor::new([0x2b, 0x90, 0x00, 0x90, 0x05]);
+        let mut cursor = Cursor::new([0x2b, 0x90, 0x00, 0x90, 0x05]);
         let mut expander = BinHexExpander::new(&mut cursor);
 
         let mut buf = [0; 8];

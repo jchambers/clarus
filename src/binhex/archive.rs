@@ -1,6 +1,6 @@
 use std::convert::{TryFrom, TryInto};
 use std::hash::Hasher;
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{self, Error, ErrorKind, Read, Write};
 use std::ops::Deref;
 
 use super::expand::BinHexExpander;
@@ -58,7 +58,7 @@ impl<'a, R: Read> ForkReader<'a, R> {
 }
 
 impl<'a, R: Read> Read for ForkReader<'a, R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() || self.bytes_read == self.len {
             Ok(0)
         } else {
@@ -91,14 +91,14 @@ impl<R: Read> BinHexArchive<R> {
         }
     }
 
-    pub fn header(&mut self) -> std::io::Result<BinHexHeader> {
+    pub fn header(&mut self) -> io::Result<BinHexHeader> {
         match &self.header {
             Some(header) => Ok(header.clone()),
             None => self.read_header(),
         }
     }
 
-    fn read_header(&mut self) -> std::io::Result<BinHexHeader> {
+    fn read_header(&mut self) -> io::Result<BinHexHeader> {
         debug_assert!(self.header.is_none());
 
         // Headers have a minimum size of 22 bytes (assuming a zero-length name) and a maximum size
@@ -125,7 +125,7 @@ impl<R: Read> BinHexArchive<R> {
         mut self,
         data_writer: &mut impl Write,
         resource_writer: &mut impl Write,
-    ) -> std::io::Result<()> {
+    ) -> io::Result<()> {
         let header = self.header()?;
 
         self.copy_fork(data_writer, header.data_fork_length)?;
@@ -134,13 +134,10 @@ impl<R: Read> BinHexArchive<R> {
         Ok(())
     }
 
-    fn copy_fork(&mut self, dest: &mut impl Write, len: usize) -> std::io::Result<()> {
+    fn copy_fork(&mut self, dest: &mut impl Write, len: usize) -> io::Result<()> {
         let (bytes_copied, calculated_checksum) = {
             let mut fork_reader = ForkReader::new(&mut self.source, len);
-            (
-                std::io::copy(&mut fork_reader, dest)?,
-                fork_reader.checksum(),
-            )
+            (io::copy(&mut fork_reader, dest)?, fork_reader.checksum())
         };
 
         debug_assert!(bytes_copied == len as u64);
@@ -167,7 +164,7 @@ impl<R: Read> BinHexArchive<R> {
 }
 
 impl TryFrom<Vec<u8>> for BinHexHeader {
-    type Error = std::io::Error;
+    type Error = io::Error;
 
     fn try_from(header_bytes: Vec<u8>) -> Result<Self, Self::Error> {
         let (name_length_bytes, remaining_bytes) = header_bytes.split_at(1);

@@ -49,10 +49,7 @@ impl State {
             (State::FindDataStart, Event::FoundDataStart) => Ok(State::ReadData),
             (State::ReadData, Event::ConsumedBytes) => Ok(State::ReadData),
             (State::ReadData, Event::FoundDataEnd) => Ok(State::Done),
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("Illegal state transition from {:?} with {:?}", self, event),
-            )),
+            _ => panic!("Illegal state transition from {:?} with {:?}", self, event),
         }
     }
 }
