@@ -352,39 +352,22 @@ mod tests {
 
     #[test]
     fn compact() {
-        let mut bytes = Vec::from("compaction!");
+        let test_strings = [
+            "compaction!",
+            "    compaction!",
+            "compaction!    ",
+            "    compaction!    ",
+            "c  omp a       ction !",
+            "  c  omp a       ction !",
+            "c  omp a       ction !    ",
+            "  c  omp a   ction !      ",
+        ];
 
-        assert_eq!(11, super::compact(bytes.as_mut_slice()));
-        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
+        test_strings.iter().for_each(|&string| {
+            let mut bytes = Vec::from(string);
 
-        bytes = Vec::from("    compaction!");
-
-        assert_eq!(11, super::compact(bytes.as_mut_slice()));
-        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
-
-        bytes = Vec::from("compaction!    ");
-
-        assert_eq!(11, super::compact(bytes.as_mut_slice()));
-        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
-
-        bytes = Vec::from("    compaction!    ");
-
-        assert_eq!(11, super::compact(bytes.as_mut_slice()));
-        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
-
-        bytes = Vec::from("c  omp a       ction !");
-
-        assert_eq!(11, super::compact(bytes.as_mut_slice()));
-        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
-
-        bytes = Vec::from("  c  omp a       ction !");
-
-        assert_eq!(11, super::compact(bytes.as_mut_slice()));
-        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
-
-        bytes = Vec::from("c  omp a       ction !          ");
-
-        assert_eq!(11, super::compact(bytes.as_mut_slice()));
-        assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
+            assert_eq!(11, super::compact(bytes.as_mut_slice()));
+            assert_eq!(b"compaction!"[..], bytes.as_slice()[..11]);
+        });
     }
 }
