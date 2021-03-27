@@ -57,6 +57,7 @@ impl State {
     }
 }
 
+/// Expands run-length-encoded BinHex data.
 pub struct BinHexExpander<R: Read> {
     source: BufReader<R>,
     state: State,
