@@ -14,46 +14,6 @@ pub struct EncodedBinHexReader<R: Read> {
     state: State,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum State {
-    FindBannerStart,
-    PartialBannerMatch(usize),
-    FindDataStart,
-    ReadData,
-    Done,
-}
-
-#[derive(Copy, Clone, Debug)]
-enum Event {
-    ConsumedBytes,
-    FoundBannerStart,
-    MatchedBannerBytes(usize),
-    FoundDataStart,
-    FoundDataEnd,
-}
-
-impl State {
-    fn advance(&self, event: Event) -> Result<Self> {
-        match (self, event) {
-            (State::FindBannerStart, Event::ConsumedBytes) => Ok(State::FindBannerStart),
-            (State::FindBannerStart, Event::FoundBannerStart) => Ok(State::PartialBannerMatch(1)),
-            (State::PartialBannerMatch(_), Event::ConsumedBytes) => Ok(State::FindBannerStart),
-            (State::PartialBannerMatch(len), Event::MatchedBannerBytes(matched)) => {
-                if len + matched == BANNER.len() {
-                    Ok(State::FindDataStart)
-                } else {
-                    Ok(State::PartialBannerMatch(len + matched))
-                }
-            }
-            (State::FindDataStart, Event::ConsumedBytes) => Ok(State::FindDataStart),
-            (State::FindDataStart, Event::FoundDataStart) => Ok(State::ReadData),
-            (State::ReadData, Event::ConsumedBytes) => Ok(State::ReadData),
-            (State::ReadData, Event::FoundDataEnd) => Ok(State::Done),
-            _ => panic!("Illegal state transition from {:?} with {:?}", self, event),
-        }
-    }
-}
-
 impl<R: Read> EncodedBinHexReader<R> {
     pub fn new(source: R) -> Self {
         EncodedBinHexReader {
@@ -164,6 +124,70 @@ impl<R: Read> Read for EncodedBinHexReader<R> {
     }
 }
 
+/// The internal state of a BinHex reader.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum State {
+    /// Looking for the BinHex banner, which may come after an arbitrary amount of human-readable
+    /// descriptive text.
+    FindBannerStart,
+
+    /// Found a partial match for the BinHex banner at the end of a read buffer; the rest (or some
+    /// of the rest) of the banner may be at the beginning of the next read buffer.
+    PartialBannerMatch(usize),
+
+    /// Looking for the "data start" byte after a complete BinHex banner.
+    FindDataStart,
+
+    /// Copying encoded BinHex data to a destination buffer.
+    ReadData,
+
+    /// Found the "data end" byte after a stream of encoded BinHex data.
+    Done,
+}
+
+impl State {
+    fn advance(&self, event: Event) -> Result<Self> {
+        match (self, event) {
+            (State::FindBannerStart, Event::ConsumedBytes) => Ok(State::FindBannerStart),
+            (State::FindBannerStart, Event::FoundBannerStart) => Ok(State::PartialBannerMatch(1)),
+            (State::PartialBannerMatch(_), Event::ConsumedBytes) => Ok(State::FindBannerStart),
+            (State::PartialBannerMatch(len), Event::MatchedBannerBytes(matched)) => {
+                if len + matched == BANNER.len() {
+                    Ok(State::FindDataStart)
+                } else {
+                    Ok(State::PartialBannerMatch(len + matched))
+                }
+            }
+            (State::FindDataStart, Event::ConsumedBytes) => Ok(State::FindDataStart),
+            (State::FindDataStart, Event::FoundDataStart) => Ok(State::ReadData),
+            (State::ReadData, Event::ConsumedBytes) => Ok(State::ReadData),
+            (State::ReadData, Event::FoundDataEnd) => Ok(State::Done),
+            _ => panic!("Illegal state transition from {:?} with {:?}", self, event),
+        }
+    }
+}
+
+/// An event produced when reading BinHex data that may alter that reader's state.
+#[derive(Copy, Clone, Debug)]
+enum Event {
+    /// The reader consumed one or more bytes that didn't lead to any state-changing events.
+    ConsumedBytes,
+
+    /// The reader encountered the start of a sequence that may be the opening BinHex banner.
+    FoundBannerStart,
+
+    /// The reader found a contiguous sequence of bytes that match the next expected bytes in a
+    /// BinHex banner.
+    MatchedBannerBytes(usize),
+
+    /// The reader located the "data start" byte after the BinHex banner.
+    FoundDataStart,
+
+    /// The reader located the "data end" byte at the end of the encoded data stream.
+    FoundDataEnd,
+}
+
+/// Returns the index of the next whitespace byte in the given slice.
 fn next_whitespace(bytes: &[u8]) -> Option<usize> {
     match (
         memchr::memchr(b' ', bytes),
@@ -174,6 +198,7 @@ fn next_whitespace(bytes: &[u8]) -> Option<usize> {
     }
 }
 
+/// Returns the index of the next non-whitespace byte in the given slice.
 fn next_data_byte(bytes: &[u8]) -> Option<usize> {
     if bytes.is_empty() {
         None
@@ -188,6 +213,12 @@ fn next_data_byte(bytes: &[u8]) -> Option<usize> {
     }
 }
 
+/// Removes whitespace from a slice by shifting non-whitespace bytes toward the beginning of the
+/// slice and returning the number of non-whitespace bytes in the buffer.
+///
+/// When this function returns, the given slice _may_ contain "junk" data after the end of the
+/// compacted non-whitespace bytes. Callers should ignore any bytes beyond the returned number of
+/// non-whitespace bytes.
 fn compact(bytes: &mut [u8]) -> usize {
     let mut scan = 0;
     let mut bytes_written = 0;
