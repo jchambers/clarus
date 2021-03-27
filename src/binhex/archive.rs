@@ -29,127 +29,6 @@ pub struct BinHexArchive<R: Read> {
     header: HeaderState,
 }
 
-#[derive(Eq, PartialEq)]
-enum HeaderState {
-    None,
-    Some(BinHexHeader),
-    Err(BinHexError),
-}
-
-/// The error type for operations on BinHex-encoded files.
-///
-/// Errors may occur while attempting to read the data (an `IoError`) or when processing the
-/// loaded content.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum BinHexError {
-    /// An [`std::io::Error`] occurred while reading some part of the archive.
-    ///
-    /// The kind of IO error is included.
-    IoError(io::ErrorKind),
-
-    /// The BinHex archive's header was malformed and could not be read.
-    InvalidHeader,
-
-    /// Data in some part of the BinHex archive was malformed and could not be read.
-    InvalidData,
-
-    /// The checksum included in a section of a BinHex archive did not match the checksum calculated
-    /// from its content.
-    ///
-    /// The section in which the checksum did not match, the checksum provided in the BinHex file,
-    /// and the checksum calculated from the section's content are included.
-    InvalidChecksum(ChecksumSection, u16, u16),
-}
-
-/// A section of a BinHex archive.
-///
-/// BinHex archives are divided into a header, a data fork, and a resource fork, each of which has
-/// its own checksum.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ChecksumSection {
-    Header,
-    DataFork,
-    ResourceFork,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct BinHexHeader {
-    name: String,
-    file_type: [u8; 4],
-    creator: [u8; 4],
-    flag: u16,
-    data_fork_length: usize,
-    resource_fork_length: usize,
-}
-
-struct ForkReader<'a, R: Read> {
-    source: &'a mut R,
-    len: usize,
-    bytes_read: usize,
-    crc: State<XMODEM>,
-}
-
-impl Display for BinHexError {
-    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            BinHexError::IoError(kind) => write!(fmt, "IO error: {:?}", kind),
-            BinHexError::InvalidHeader => write!(fmt, "Malformed BinHex header"),
-            BinHexError::InvalidData => write!(fmt, "Malformed BinHex data"),
-            BinHexError::InvalidChecksum(section, provided, calculated) => write!(
-                fmt,
-                "Invalid checksum; section={:?}, expected={:04x}, calculated={:04x}",
-                section, provided, calculated
-            ),
-        }
-    }
-}
-
-impl From<io::Error> for BinHexError {
-    fn from(error: io::Error) -> Self {
-        BinHexError::IoError(error.kind())
-    }
-}
-
-impl error::Error for BinHexError {}
-
-impl<'a, R: Read> ForkReader<'a, R> {
-    fn new(source: &'a mut R, len: usize) -> Self {
-        ForkReader {
-            source,
-            len,
-            bytes_read: 0,
-            crc: State::<XMODEM>::new(),
-        }
-    }
-
-    fn checksum(&self) -> u16 {
-        debug_assert!(self.bytes_read == self.len);
-        self.crc.get()
-    }
-}
-
-impl<'a, R: Read> Read for ForkReader<'a, R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() || self.bytes_read == self.len {
-            Ok(0)
-        } else {
-            let remaining_bytes = self.len - self.bytes_read;
-
-            let bytes_copied = if buf.len() <= remaining_bytes {
-                self.source.read(buf)?
-            } else {
-                self.source.read_exact(&mut buf[..remaining_bytes])?;
-                remaining_bytes
-            };
-
-            self.crc.write(&buf[..bytes_copied]);
-            self.bytes_read += bytes_copied;
-
-            Ok(bytes_copied)
-        }
-    }
-}
-
 impl<R: Read> BinHexArchive<R> {
     /// Creates a new BinHex archive that will extract data from the given reader.
     pub fn new(source: R) -> Self {
@@ -410,6 +289,82 @@ impl<R: Read> BinHexArchive<R> {
     }
 }
 
+#[derive(Eq, PartialEq)]
+enum HeaderState {
+    None,
+    Some(BinHexHeader),
+    Err(BinHexError),
+}
+
+/// The error type for operations on BinHex-encoded files.
+///
+/// Errors may occur while attempting to read the data (an `IoError`) or when processing the
+/// loaded content.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BinHexError {
+    /// An [`std::io::Error`] occurred while reading some part of the archive.
+    ///
+    /// The kind of IO error is included.
+    IoError(io::ErrorKind),
+
+    /// The BinHex archive's header was malformed and could not be read.
+    InvalidHeader,
+
+    /// Data in some part of the BinHex archive was malformed and could not be read.
+    InvalidData,
+
+    /// The checksum included in a section of a BinHex archive did not match the checksum calculated
+    /// from its content.
+    ///
+    /// The section in which the checksum did not match, the checksum provided in the BinHex file,
+    /// and the checksum calculated from the section's content are included.
+    InvalidChecksum(ChecksumSection, u16, u16),
+}
+
+impl Display for BinHexError {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            BinHexError::IoError(kind) => write!(fmt, "IO error: {:?}", kind),
+            BinHexError::InvalidHeader => write!(fmt, "Malformed BinHex header"),
+            BinHexError::InvalidData => write!(fmt, "Malformed BinHex data"),
+            BinHexError::InvalidChecksum(section, provided, calculated) => write!(
+                fmt,
+                "Invalid checksum; section={:?}, expected={:04x}, calculated={:04x}",
+                section, provided, calculated
+            ),
+        }
+    }
+}
+
+impl From<io::Error> for BinHexError {
+    fn from(error: io::Error) -> Self {
+        BinHexError::IoError(error.kind())
+    }
+}
+
+impl error::Error for BinHexError {}
+
+/// A section of a BinHex archive.
+///
+/// BinHex archives are divided into a header, a data fork, and a resource fork, each of which has
+/// its own checksum.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ChecksumSection {
+    Header,
+    DataFork,
+    ResourceFork,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BinHexHeader {
+    name: String,
+    file_type: [u8; 4],
+    creator: [u8; 4],
+    flag: u16,
+    data_fork_length: usize,
+    resource_fork_length: usize,
+}
+
 impl TryFrom<Vec<u8>> for BinHexHeader {
     type Error = BinHexError;
 
@@ -462,6 +417,51 @@ impl TryFrom<Vec<u8>> for BinHexHeader {
             data_fork_length,
             resource_fork_length,
         })
+    }
+}
+
+struct ForkReader<'a, R: Read> {
+    source: &'a mut R,
+    len: usize,
+    bytes_read: usize,
+    crc: State<XMODEM>,
+}
+
+impl<'a, R: Read> ForkReader<'a, R> {
+    fn new(source: &'a mut R, len: usize) -> Self {
+        ForkReader {
+            source,
+            len,
+            bytes_read: 0,
+            crc: State::<XMODEM>::new(),
+        }
+    }
+
+    fn checksum(&self) -> u16 {
+        debug_assert!(self.bytes_read == self.len);
+        self.crc.get()
+    }
+}
+
+impl<'a, R: Read> Read for ForkReader<'a, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() || self.bytes_read == self.len {
+            Ok(0)
+        } else {
+            let remaining_bytes = self.len - self.bytes_read;
+
+            let bytes_copied = if buf.len() <= remaining_bytes {
+                self.source.read(buf)?
+            } else {
+                self.source.read_exact(&mut buf[..remaining_bytes])?;
+                remaining_bytes
+            };
+
+            self.crc.write(&buf[..bytes_copied]);
+            self.bytes_read += bytes_copied;
+
+            Ok(bytes_copied)
+        }
     }
 }
 
