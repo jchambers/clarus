@@ -167,7 +167,23 @@ impl<R: Read> BinHexArchive<R> {
         let source = &mut self.source;
 
         if self.header == HeaderState::None {
-            self.header = match BinHexArchive::read_header(source) {
+            self.header = match (|| {
+                // Headers have a minimum size of 22 bytes (assuming a zero-length name) and a
+                // maximum size of 277 bytes (assuming a 255-byte name); to avoid overshooting and
+                // eating into the data fork, we read the minimum, check the name length, and extend
+                // as needed.
+                let mut header_bytes = Vec::with_capacity(277);
+                header_bytes.resize(22, 0);
+
+                source.read_exact(header_bytes.as_mut_slice())?;
+
+                let name_length = header_bytes[0] as usize;
+
+                header_bytes.resize(header_bytes.len() + name_length, 0);
+                source.read_exact(&mut header_bytes.as_mut_slice()[22..])?;
+
+                BinHexHeader::try_from(header_bytes)
+            })() {
                 Ok(header) => HeaderState::Some(header),
                 Err(error) => HeaderState::Err(error),
             };
@@ -176,27 +192,8 @@ impl<R: Read> BinHexArchive<R> {
         match self.header {
             HeaderState::Some(ref header) => Ok(&header),
             HeaderState::Err(error) => Err(error),
-            _ => panic!("Illegal header state"),
+            _ => unreachable!(),
         }
-    }
-
-    fn read_header(
-        source: &mut BinHexExpander<DecodeReader<&'static CustomConfig, EncodedBinHexReader<R>>>,
-    ) -> Result<BinHexHeader, BinHexError> {
-        // Headers have a minimum size of 22 bytes (assuming a zero-length name) and a maximum size
-        // of 277 bytes (assuming a 255-byte name); to avoid overshooting and eating into the data
-        // fork, we read the minimum, check the name length, and extend as needed.
-        let mut header_bytes = Vec::with_capacity(277);
-        header_bytes.resize(22, 0);
-
-        source.read_exact(header_bytes.as_mut_slice())?;
-
-        let name_length = header_bytes[0] as usize;
-
-        header_bytes.resize(header_bytes.len() + name_length, 0);
-        source.read_exact(&mut header_bytes.as_mut_slice()[22..])?;
-
-        BinHexHeader::try_from(header_bytes)
     }
 
     /// Returns the original filename of the file contained in this archive.
