@@ -20,6 +20,10 @@ lazy_static::lazy_static! {
     .expect("Failed to build BinHex base64 config");
 }
 
+/// A BinHex-encoded archive.
+///
+/// BinHex archives encode the data fork, resource fork, and metadata associated with a "classic"
+/// Macintosh file.
 pub struct BinHexArchive<R: Read> {
     source: BinHexExpander<DecodeReader<&'static CustomConfig, EncodedBinHexReader<R>>>,
     header: HeaderState,
@@ -32,16 +36,37 @@ enum HeaderState {
     Err(BinHexError),
 }
 
+/// The error type for operations on BinHex-encoded files.
+///
+/// Errors may occur while attempting to read the data (an `IoError`) or when processing the
+/// loaded content.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BinHexError {
+    /// An [`std::io::Error`] occurred while reading some part of the archive.
+    ///
+    /// The kind of IO error is included.
     IoError(io::ErrorKind),
+
+    /// The BinHex archive's header was malformed and could not be read.
     InvalidHeader,
+
+    /// Data in some part of the BinHex archive was malformed and could not be read.
     InvalidData,
-    InvalidChecksum(ArchiveSection, u16, u16),
+
+    /// The checksum included in a section of a BinHex archive did not match the checksum calculated
+    /// from its content.
+    ///
+    /// The section in which the checksum did not match, the checksum provided in the BinHex file,
+    /// and the checksum calculated from the section's content are included.
+    InvalidChecksum(ChecksumSection, u16, u16),
 }
 
+/// A section of a BinHex archive.
+///
+/// BinHex archives are divided into a header, a data fork, and a resource fork, each of which has
+/// its own checksum.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ArchiveSection {
+pub enum ChecksumSection {
     Header,
     DataFork,
     ResourceFork,
@@ -126,6 +151,7 @@ impl<'a, R: Read> Read for ForkReader<'a, R> {
 }
 
 impl<R: Read> BinHexArchive<R> {
+    /// Creates a new BinHex archive that will extract data from the given reader.
     pub fn new(source: R) -> Self {
         let reader = EncodedBinHexReader::new(source);
         let decoder = DecodeReader::new(BINHEX_CONFIG.deref(), reader);
@@ -173,30 +199,159 @@ impl<R: Read> BinHexArchive<R> {
         BinHexHeader::try_from(header_bytes)
     }
 
-    pub fn filename(&mut self) -> Result<String, BinHexError> {
-        self.header().map(|header| header.name.clone())
+    /// Returns the original filename of the file contained in this archive.
+    ///
+    /// # Errors
+    ///
+    /// This method will return an error if the archive's header could not be read for any reason.
+    pub fn filename(&mut self) -> Result<&String, BinHexError> {
+        self.header().map(|header| &header.name)
     }
 
+    /// Returns the file type identifier for the file contained in this archive.
+    ///
+    /// For a detailed description of file signatures (including file type identifiers), please see
+    /// the ["Giving a Signature to Your Application and a Creator and a File Type to Your
+    /// Documents" section of "Inside Macintosh: Macintosh Toolbox
+    /// Essentials"](https://developer.apple.com/library/archive/documentation/mac/pdf/MacintoshToolboxEssentials.pdf#page=806).
+    ///
+    /// # Errors
+    ///
+    /// This method will return an error if the archive's header could not be read for any reason.
     pub fn file_type(&mut self) -> Result<[u8; 4], BinHexError> {
         self.header().map(|header| header.file_type)
     }
 
+    /// Returns the creator identifier for the file contained in this archive.
+    ///
+    /// For a detailed description of file signatures (including creator identifiers), please see
+    /// the ["Giving a Signature to Your Application and a Creator and a File Type to Your
+    /// Documents" section of "Inside Macintosh: Macintosh Toolbox
+    /// Essentials"](https://developer.apple.com/library/archive/documentation/mac/pdf/MacintoshToolboxEssentials.pdf#page=806).
+    ///
+    /// # Errors
+    ///
+    /// This method will return an error if the archive's header could not be read for any reason.
     pub fn creator(&mut self) -> Result<[u8; 4], BinHexError> {
         self.header().map(|header| header.creator)
     }
 
+    /// Returns the Finder flags for the file contained in this archive.
+    ///
+    /// For a detailed description of the Finder flags, please see [the "File Information Record"
+    /// section of "Inside Macintosh: Macintosh Toolbox
+    /// Essentials"](https://developer.apple.com/library/archive/documentation/mac/pdf/MacintoshToolboxEssentials.pdf#page=845).
+    ///
+    /// # Errors
+    ///
+    /// This method will return an error if the archive's header could not be read for any reason.
     pub fn flags(&mut self) -> Result<u16, BinHexError> {
         self.header().map(|header| header.flag)
     }
 
+    /// Returns the length, in bytes after decoding, of the data fork contained in this archive.
+    ///
+    /// # Errors
+    ///
+    /// This method will return an error if the archive's header could not be read for any reason.
     pub fn data_fork_len(&mut self) -> Result<usize, BinHexError> {
         self.header().map(|header| header.data_fork_length)
     }
 
+    /// Returns the length, in bytes after decoding, of the resource fork contained in this archive.
+    ///
+    /// # Errors
+    ///
+    /// This method will return an error if the archive's header could not be read for any reason.
     pub fn resource_fork_len(&mut self) -> Result<usize, BinHexError> {
         self.header().map(|header| header.resource_fork_length)
     }
 
+    /// Extracts this archive's content to the given writers, verifying checksums in the process.
+    ///
+    /// This method may return an error after some or all of the archive's content has been written
+    /// to the given writers.
+    ///
+    /// # Errors
+    ///
+    /// This method returns an error immediately if it encounters an IO error while extracting data,
+    /// if it encounters malformed data in the archive, or if a checksum fails.
+    ///
+    /// # Examples
+    ///
+    /// ## Read archive content into memory
+    ///
+    /// The most common use case for BinHex archives is extracting the content of the archive for
+    /// further processing or use. As an example of loading an archive's content into memory:
+    ///
+    /// ```no_run
+    /// use std::fs::File;
+    /// use clarus::binhex::{BinHexArchive, BinHexError};
+    ///
+    /// fn main() -> Result<(), BinHexError> {
+    ///     let binhex_file = File::open("example.hqx")?;
+    ///     let mut archive = BinHexArchive::new(binhex_file);
+    ///
+    ///     let mut data_fork_content = Vec::with_capacity(archive.data_fork_len()?);
+    ///     let mut rsrc_fork_content = Vec::with_capacity(archive.resource_fork_len()?);
+    ///
+    ///     archive.extract(&mut data_fork_content, &mut rsrc_fork_content)
+    /// }
+    /// ```
+    ///
+    /// ## Write the data fork of an archive to a file
+    ///
+    /// It's not always necessary to use both forks of a file. Callers may want to extract only the
+    /// data fork of a file, for example. In that case, we can discard the content of the resource
+    /// fork using a [`std::io::Sink`]:
+    ///
+    /// ```no_run
+    /// use std::fs::File;
+    /// use std::io;
+    /// use clarus::binhex::{BinHexArchive, BinHexError};
+    ///
+    /// fn main() -> Result<(), BinHexError> {
+    ///     let binhex_file = File::open("example.hqx")?;
+    ///     let mut archive = BinHexArchive::new(binhex_file);
+    ///
+    ///     let mut data_file = File::open("binhex-data.txt")?;
+    ///     let mut sink = io::sink();
+    ///
+    ///     archive.extract(&mut data_file, &mut sink)
+    /// }
+    /// ```
+    ///
+    /// ## Verify checksums without writing data
+    ///
+    /// In some cases, callers may not be immediately interested in the content of an archive at
+    /// all, and may just want to verify its integrity. To verify the integrity of an archive—
+    /// especially its checksums—we still need to read and inspect all of the data. We don't need
+    /// to do anything with it, though, and can simply discard it:
+    ///
+    /// ```no_run
+    /// use std::fs::File;
+    /// use std::io;
+    /// use clarus::binhex::{BinHexArchive, BinHexError};
+    ///
+    /// fn main() -> Result<(), BinHexError> {
+    ///     let binhex_file = File::open("example.hqx")?;
+    ///     let mut archive = BinHexArchive::new(binhex_file);
+    ///
+    ///     let mut data_sink = io::sink();
+    ///     let mut rsrc_sink = io::sink();
+    ///
+    ///     match archive.extract(&mut data_sink, &mut rsrc_sink) {
+    ///         Ok(_) => println!("Looks good!"),
+    ///         Err(BinHexError::InvalidChecksum(section, provided, calculated)) => {
+    ///             println!("Bad checksum in {:?}; expected {:04x}, but calculated {:04x}",
+    ///                      section, provided, calculated)
+    ///         },
+    ///         Err(error) => println!("Something else went wrong: {:?}", error),
+    ///     };
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn extract(
         mut self,
         data_writer: &mut impl Write,
@@ -207,17 +362,28 @@ impl<R: Read> BinHexArchive<R> {
             (header.data_fork_length, header.resource_fork_length)
         };
 
-        self.copy_fork(ArchiveSection::DataFork, data_writer, data_fork_length)?;
+        self.copy_fork(ChecksumSection::DataFork, data_writer, data_fork_length)?;
         self.copy_fork(
-            ArchiveSection::ResourceFork,
+            ChecksumSection::ResourceFork,
             resource_writer,
             resource_fork_length,
         )
     }
 
+    /// Copies one of an archive's two forks to a destination writer and verifies the checksum at
+    /// the end of the fork's content.
+    ///
+    /// The length of the fork must be known, and the source `Read` must be positioned at the start
+    /// of the fork.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error immediately if an IO operation (i.e. [`std::io::copy`])
+    /// returns an error. It will also return an error if the checksum at the end of the fork's
+    /// content does not match the checksum calculated from the fork's content.
     fn copy_fork(
         &mut self,
-        section: ArchiveSection,
+        section: ChecksumSection,
         dest: &mut impl Write,
         len: usize,
     ) -> Result<(), BinHexError> {
@@ -275,7 +441,7 @@ impl TryFrom<Vec<u8>> for BinHexHeader {
 
         if provided_checksum != calculated_checksum {
             return Err(BinHexError::InvalidChecksum(
-                ArchiveSection::Header,
+                ChecksumSection::Header,
                 provided_checksum,
                 calculated_checksum,
             ));
@@ -350,7 +516,7 @@ mod test {
         let mut archive = BinHexArchive::new(Cursor::new(SIMPLE_TEXT_DOCUMENT));
 
         assert_eq!(
-            String::from("SimpleText™ Document"),
+            &String::from("SimpleText™ Document"),
             archive.filename().unwrap()
         );
     }
