@@ -9,7 +9,6 @@ use super::expand::BinHexExpander;
 use super::read::EncodedBinHexReader;
 
 use crc16::{State, XMODEM};
-use lazycell::LazyCell;
 use radix64::io::DecodeReader;
 use radix64::CustomConfig;
 
@@ -23,25 +22,32 @@ lazy_static::lazy_static! {
 
 pub struct BinHexArchive<R: Read> {
     source: BinHexExpander<DecodeReader<&'static CustomConfig, EncodedBinHexReader<R>>>,
-    header: LazyCell<BinHexHeader>,
+    header: HeaderState,
 }
 
-#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+enum HeaderState {
+    None,
+    Some(BinHexHeader),
+    Err(BinHexError),
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BinHexError {
-    IoError(io::Error),
+    IoError(io::ErrorKind),
     InvalidHeader,
     InvalidData,
     InvalidChecksum(ArchiveSection, u16, u16),
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ArchiveSection {
     Header,
     DataFork,
     ResourceFork,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct BinHexHeader {
     name: String,
     file_type: [u8; 4],
@@ -61,7 +67,7 @@ struct ForkReader<'a, R: Read> {
 impl Display for BinHexError {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            BinHexError::IoError(source) => write!(fmt, "IO error: {}", source),
+            BinHexError::IoError(kind) => write!(fmt, "IO error: {:?}", kind),
             BinHexError::InvalidHeader => write!(fmt, "Malformed BinHex header"),
             BinHexError::InvalidData => write!(fmt, "Malformed BinHex data"),
             BinHexError::InvalidChecksum(section, provided, calculated) => write!(
@@ -75,18 +81,11 @@ impl Display for BinHexError {
 
 impl From<io::Error> for BinHexError {
     fn from(error: io::Error) -> Self {
-        BinHexError::IoError(error)
+        BinHexError::IoError(error.kind())
     }
 }
 
-impl error::Error for BinHexError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        match self {
-            BinHexError::IoError(error) => Some(error),
-            _ => None,
-        }
-    }
-}
+impl error::Error for BinHexError {}
 
 impl<'a, R: Read> ForkReader<'a, R> {
     fn new(source: &'a mut R, len: usize) -> Self {
@@ -134,29 +133,44 @@ impl<R: Read> BinHexArchive<R> {
 
         BinHexArchive {
             source: expander,
-            header: LazyCell::new(),
+            header: HeaderState::None,
         }
     }
 
     fn header(&mut self) -> Result<&BinHexHeader, BinHexError> {
         let source = &mut self.source;
 
-        self.header.try_borrow_with(|| {
-            // Headers have a minimum size of 22 bytes (assuming a zero-length name) and a maximum size
-            // of 277 bytes (assuming a 255-byte name); to avoid overshooting and eating into the data
-            // fork, we read the minimum, check the name length, and extend as needed.
-            let mut header_bytes = Vec::with_capacity(277);
-            header_bytes.resize(22, 0);
+        if self.header == HeaderState::None {
+            self.header = match BinHexArchive::read_header(source) {
+                Ok(header) => HeaderState::Some(header),
+                Err(error) => HeaderState::Err(error),
+            };
+        }
 
-            source.read_exact(header_bytes.as_mut_slice())?;
+        match self.header {
+            HeaderState::Some(ref header) => Ok(&header),
+            HeaderState::Err(error) => Err(error),
+            _ => panic!("Illegal header state"),
+        }
+    }
 
-            let name_length = header_bytes[0] as usize;
+    fn read_header(
+        source: &mut BinHexExpander<DecodeReader<&'static CustomConfig, EncodedBinHexReader<R>>>,
+    ) -> Result<BinHexHeader, BinHexError> {
+        // Headers have a minimum size of 22 bytes (assuming a zero-length name) and a maximum size
+        // of 277 bytes (assuming a 255-byte name); to avoid overshooting and eating into the data
+        // fork, we read the minimum, check the name length, and extend as needed.
+        let mut header_bytes = Vec::with_capacity(277);
+        header_bytes.resize(22, 0);
 
-            header_bytes.resize(header_bytes.len() + name_length, 0);
-            source.read_exact(&mut header_bytes.as_mut_slice()[22..])?;
+        source.read_exact(header_bytes.as_mut_slice())?;
 
-            BinHexHeader::try_from(header_bytes)
-        })
+        let name_length = header_bytes[0] as usize;
+
+        header_bytes.resize(header_bytes.len() + name_length, 0);
+        source.read_exact(&mut header_bytes.as_mut_slice()[22..])?;
+
+        BinHexHeader::try_from(header_bytes)
     }
 
     pub fn filename(&mut self) -> Result<String, BinHexError> {
