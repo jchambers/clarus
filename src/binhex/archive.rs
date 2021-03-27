@@ -26,62 +26,47 @@ lazy_static::lazy_static! {
 /// Macintosh file.
 pub struct BinHexArchive<R: Read> {
     source: BinHexExpander<DecodeReader<&'static CustomConfig, EncodedBinHexReader<R>>>,
-    header: HeaderState,
+    header: BinHexHeader,
 }
 
 impl<R: Read> BinHexArchive<R> {
     /// Creates a new BinHex archive that will extract data from the given reader.
-    pub fn new(source: R) -> Self {
-        let reader = EncodedBinHexReader::new(source);
-        let decoder = DecodeReader::new(BINHEX_CONFIG.deref(), reader);
-        let expander = BinHexExpander::new(decoder);
-
-        BinHexArchive {
-            source: expander,
-            header: HeaderState::None,
-        }
-    }
-
-    fn header(&mut self) -> Result<&BinHexHeader, BinHexError> {
-        let source = &mut self.source;
-
-        if self.header == HeaderState::None {
-            self.header = match (|| {
-                // Headers have a minimum size of 22 bytes (assuming a zero-length name) and a
-                // maximum size of 277 bytes (assuming a 255-byte name); to avoid overshooting and
-                // eating into the data fork, we read the minimum, check the name length, and extend
-                // as needed.
-                let mut header_bytes = Vec::with_capacity(277);
-                header_bytes.resize(22, 0);
-
-                source.read_exact(header_bytes.as_mut_slice())?;
-
-                let name_length = header_bytes[0] as usize;
-
-                header_bytes.resize(header_bytes.len() + name_length, 0);
-                source.read_exact(&mut header_bytes.as_mut_slice()[22..])?;
-
-                BinHexHeader::try_from(header_bytes)
-            })() {
-                Ok(header) => HeaderState::Some(header),
-                Err(error) => HeaderState::Err(error),
-            };
-        }
-
-        match self.header {
-            HeaderState::Some(ref header) => Ok(&header),
-            HeaderState::Err(error) => Err(error),
-            _ => unreachable!(),
-        }
-    }
-
-    /// Returns the original filename of the file contained in this archive.
     ///
     /// # Errors
     ///
-    /// This method will return an error if the archive's header could not be read for any reason.
-    pub fn filename(&mut self) -> Result<&String, BinHexError> {
-        self.header().map(|header| &header.name)
+    /// This function will return an error if a valid BinHex header could not be read from the given
+    /// source.
+    pub fn new(source: R) -> Result<Self, BinHexError> {
+        let reader = EncodedBinHexReader::new(source);
+        let decoder = DecodeReader::new(BINHEX_CONFIG.deref(), reader);
+        let mut expander = BinHexExpander::new(decoder);
+
+        let header = {
+            // Headers have a minimum size of 22 bytes (assuming a zero-length name) and a maximum
+            // size of 277 bytes (assuming a 255-byte name); to avoid overshooting and eating into
+            // the data fork, we read the minimum, check the name length, and extend as needed.
+            let mut header_bytes = Vec::with_capacity(277);
+            header_bytes.resize(22, 0);
+
+            expander.read_exact(header_bytes.as_mut_slice())?;
+
+            let name_length = header_bytes[0] as usize;
+
+            header_bytes.resize(header_bytes.len() + name_length, 0);
+            expander.read_exact(&mut header_bytes.as_mut_slice()[22..])?;
+
+            BinHexHeader::try_from(header_bytes)?
+        };
+
+        Ok(BinHexArchive {
+            source: expander,
+            header: header,
+        })
+    }
+
+    /// Returns the original filename of the file contained in this archive.
+    pub fn filename(&mut self) -> &String {
+        &self.header.name
     }
 
     /// Returns the file type identifier for the file contained in this archive.
@@ -90,12 +75,8 @@ impl<R: Read> BinHexArchive<R> {
     /// the ["Giving a Signature to Your Application and a Creator and a File Type to Your
     /// Documents" section of "Inside Macintosh: Macintosh Toolbox
     /// Essentials"](https://developer.apple.com/library/archive/documentation/mac/pdf/MacintoshToolboxEssentials.pdf#page=806).
-    ///
-    /// # Errors
-    ///
-    /// This method will return an error if the archive's header could not be read for any reason.
-    pub fn file_type(&mut self) -> Result<[u8; 4], BinHexError> {
-        self.header().map(|header| header.file_type)
+    pub fn file_type(&mut self) -> [u8; 4] {
+        self.header.file_type
     }
 
     /// Returns the creator identifier for the file contained in this archive.
@@ -104,12 +85,8 @@ impl<R: Read> BinHexArchive<R> {
     /// the ["Giving a Signature to Your Application and a Creator and a File Type to Your
     /// Documents" section of "Inside Macintosh: Macintosh Toolbox
     /// Essentials"](https://developer.apple.com/library/archive/documentation/mac/pdf/MacintoshToolboxEssentials.pdf#page=806).
-    ///
-    /// # Errors
-    ///
-    /// This method will return an error if the archive's header could not be read for any reason.
-    pub fn creator(&mut self) -> Result<[u8; 4], BinHexError> {
-        self.header().map(|header| header.creator)
+    pub fn creator(&mut self) -> [u8; 4] {
+        self.header.creator
     }
 
     /// Returns the Finder flags for the file contained in this archive.
@@ -117,30 +94,18 @@ impl<R: Read> BinHexArchive<R> {
     /// For a detailed description of the Finder flags, please see [the "File Information Record"
     /// section of "Inside Macintosh: Macintosh Toolbox
     /// Essentials"](https://developer.apple.com/library/archive/documentation/mac/pdf/MacintoshToolboxEssentials.pdf#page=845).
-    ///
-    /// # Errors
-    ///
-    /// This method will return an error if the archive's header could not be read for any reason.
-    pub fn flags(&mut self) -> Result<u16, BinHexError> {
-        self.header().map(|header| header.flag)
+    pub fn flags(&mut self) -> u16 {
+        self.header.flag
     }
 
     /// Returns the length, in bytes after decoding, of the data fork contained in this archive.
-    ///
-    /// # Errors
-    ///
-    /// This method will return an error if the archive's header could not be read for any reason.
-    pub fn data_fork_len(&mut self) -> Result<usize, BinHexError> {
-        self.header().map(|header| header.data_fork_length)
+    pub fn data_fork_len(&mut self) -> usize {
+        self.header.data_fork_length
     }
 
     /// Returns the length, in bytes after decoding, of the resource fork contained in this archive.
-    ///
-    /// # Errors
-    ///
-    /// This method will return an error if the archive's header could not be read for any reason.
-    pub fn resource_fork_len(&mut self) -> Result<usize, BinHexError> {
-        self.header().map(|header| header.resource_fork_length)
+    pub fn resource_fork_len(&mut self) -> usize {
+        self.header.resource_fork_length
     }
 
     /// Extracts this archive's content to the given writers, verifying checksums in the process.
@@ -166,10 +131,10 @@ impl<R: Read> BinHexArchive<R> {
     ///
     /// fn main() -> Result<(), BinHexError> {
     ///     let binhex_file = File::open("example.hqx")?;
-    ///     let mut archive = BinHexArchive::new(binhex_file);
+    ///     let mut archive = BinHexArchive::new(binhex_file)?;
     ///
-    ///     let mut data_fork_content = Vec::with_capacity(archive.data_fork_len()?);
-    ///     let mut rsrc_fork_content = Vec::with_capacity(archive.resource_fork_len()?);
+    ///     let mut data_fork_content = Vec::with_capacity(archive.data_fork_len());
+    ///     let mut rsrc_fork_content = Vec::with_capacity(archive.resource_fork_len());
     ///
     ///     archive.extract(&mut data_fork_content, &mut rsrc_fork_content)
     /// }
@@ -188,7 +153,7 @@ impl<R: Read> BinHexArchive<R> {
     ///
     /// fn main() -> Result<(), BinHexError> {
     ///     let binhex_file = File::open("example.hqx")?;
-    ///     let mut archive = BinHexArchive::new(binhex_file);
+    ///     let mut archive = BinHexArchive::new(binhex_file)?;
     ///
     ///     let mut data_file = File::open("binhex-data.txt")?;
     ///     let mut sink = io::sink();
@@ -211,7 +176,7 @@ impl<R: Read> BinHexArchive<R> {
     ///
     /// fn main() -> Result<(), BinHexError> {
     ///     let binhex_file = File::open("example.hqx")?;
-    ///     let mut archive = BinHexArchive::new(binhex_file);
+    ///     let mut archive = BinHexArchive::new(binhex_file)?;
     ///
     ///     let mut data_sink = io::sink();
     ///     let mut rsrc_sink = io::sink();
@@ -233,16 +198,16 @@ impl<R: Read> BinHexArchive<R> {
         data_writer: &mut impl Write,
         resource_writer: &mut impl Write,
     ) -> Result<(), BinHexError> {
-        let (data_fork_length, resource_fork_length) = {
-            let header = self.header()?;
-            (header.data_fork_length, header.resource_fork_length)
-        };
+        self.copy_fork(
+            ChecksumSection::DataFork,
+            data_writer,
+            self.header.data_fork_length,
+        )?;
 
-        self.copy_fork(ChecksumSection::DataFork, data_writer, data_fork_length)?;
         self.copy_fork(
             ChecksumSection::ResourceFork,
             resource_writer,
-            resource_fork_length,
+            self.header.resource_fork_length,
         )
     }
 
@@ -287,13 +252,6 @@ impl<R: Read> BinHexArchive<R> {
             ))
         }
     }
-}
-
-#[derive(Eq, PartialEq)]
-enum HeaderState {
-    None,
-    Some(BinHexHeader),
-    Err(BinHexError),
 }
 
 /// The error type for operations on BinHex-encoded files.
@@ -495,71 +453,68 @@ mod test {
     };
 
     #[test]
-    fn read_header() {
-        let mut archive = BinHexArchive::new(Cursor::new(BINHEX_DATA));
+    fn filename() -> Result<(), BinHexError> {
+        let mut archive = BinHexArchive::new(Cursor::new(SIMPLE_TEXT_DOCUMENT))?;
 
-        let header = archive.header().unwrap();
+        assert_eq!(&String::from("SimpleText™ Document"), archive.filename());
 
-        assert_eq!("binhex-test.txt", header.name);
-        assert_eq!([0; 4], header.file_type);
-        assert_eq!([0; 4], header.creator);
-        assert_eq!(0, header.flag);
-        assert_eq!(DATA_FORK.len(), header.data_fork_length);
-        assert_eq!(RESOURCE_FORK.len(), header.resource_fork_length);
+        Ok(())
     }
 
     #[test]
-    fn filename() {
-        let mut archive = BinHexArchive::new(Cursor::new(SIMPLE_TEXT_DOCUMENT));
+    fn file_type() -> Result<(), BinHexError> {
+        let mut archive = BinHexArchive::new(Cursor::new(SIMPLE_TEXT_DOCUMENT))?;
+        assert_eq!(b"TEXT", &archive.file_type());
 
-        assert_eq!(
-            &String::from("SimpleText™ Document"),
-            archive.filename().unwrap()
-        );
+        Ok(())
     }
 
     #[test]
-    fn file_type() {
-        let mut archive = BinHexArchive::new(Cursor::new(SIMPLE_TEXT_DOCUMENT));
-        assert_eq!(b"TEXT", &archive.file_type().unwrap());
+    fn creator() -> Result<(), BinHexError> {
+        let mut archive = BinHexArchive::new(Cursor::new(SIMPLE_TEXT_DOCUMENT))?;
+        assert_eq!(b"ttxt", &archive.creator());
+
+        Ok(())
     }
 
     #[test]
-    fn creator() {
-        let mut archive = BinHexArchive::new(Cursor::new(SIMPLE_TEXT_DOCUMENT));
-        assert_eq!(b"ttxt", &archive.creator().unwrap());
+    fn flags() -> Result<(), BinHexError> {
+        let mut archive = BinHexArchive::new(Cursor::new(SIMPLE_TEXT_DOCUMENT))?;
+        assert_eq!(0x0000, archive.flags());
+
+        Ok(())
     }
 
     #[test]
-    fn flags() {
-        let mut archive = BinHexArchive::new(Cursor::new(SIMPLE_TEXT_DOCUMENT));
-        assert_eq!(0x0000, archive.flags().unwrap());
+    fn data_fork_len() -> Result<(), BinHexError> {
+        let mut archive = BinHexArchive::new(Cursor::new(BINHEX_DATA))?;
+        assert_eq!(DATA_FORK.len(), archive.data_fork_len());
+
+        Ok(())
     }
 
     #[test]
-    fn data_fork_len() {
-        let mut archive = BinHexArchive::new(Cursor::new(BINHEX_DATA));
-        assert_eq!(DATA_FORK.len(), archive.data_fork_len().unwrap());
+    fn resource_fork_len() -> Result<(), BinHexError> {
+        let mut archive = BinHexArchive::new(Cursor::new(BINHEX_DATA))?;
+        assert_eq!(RESOURCE_FORK.len(), archive.resource_fork_len());
+
+        Ok(())
     }
 
     #[test]
-    fn resource_fork_len() {
-        let mut archive = BinHexArchive::new(Cursor::new(BINHEX_DATA));
-        assert_eq!(RESOURCE_FORK.len(), archive.resource_fork_len().unwrap());
-    }
-
-    #[test]
-    fn extract() {
+    fn extract() -> Result<(), BinHexError> {
         let cursor = Cursor::new(BINHEX_DATA);
 
-        let archive = BinHexArchive::new(cursor);
+        let archive = BinHexArchive::new(cursor)?;
 
         let mut data_fork = vec![];
         let mut resource_fork = vec![];
 
-        archive.extract(&mut data_fork, &mut resource_fork).unwrap();
+        archive.extract(&mut data_fork, &mut resource_fork)?;
 
         assert_eq!(DATA_FORK, data_fork.as_slice());
         assert_eq!(RESOURCE_FORK, resource_fork.as_slice());
+
+        Ok(())
     }
 }
