@@ -10,7 +10,7 @@
 //! Toolbox"](https://developer.apple.com/library/archive/documentation/mac/pdf/MoreMacintoshToolbox.pdf)
 
 use std::collections::HashMap;
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 use std::io::{Error, Read, Seek, SeekFrom};
 
 const NO_NAME: u16 = 0xffff;
@@ -21,7 +21,90 @@ const NO_NAME: u16 = 0xffff;
 /// user-facing contexts. For details, please see the ["The Resource Type" section of "Inside
 /// Macintosh: More Macintosh
 /// Toolbox."](https://developer.apple.com/library/archive/documentation/mac/pdf/MoreMacintoshToolbox.pdf#page=72)
-pub type ResourceType = [u8; 4];
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ResourceType {
+    bytes: [u8; 4],
+}
+
+impl From<[u8; 4]> for ResourceType {
+    fn from(bytes: [u8; 4]) -> Self {
+        ResourceType { bytes }
+    }
+}
+
+impl TryFrom<&[u8]> for ResourceType {
+    type Error = ResourceTypeError;
+
+    fn try_from(slice: &[u8]) -> Result<Self, Self::Error> {
+        if slice.len() == 4 {
+            Ok(ResourceType::from(
+                TryInto::<[u8; 4]>::try_into(slice).unwrap(),
+            ))
+        } else {
+            Err(ResourceTypeError::BadEncodedLength(slice.len()))
+        }
+    }
+}
+
+impl TryFrom<&str> for ResourceType {
+    type Error = ResourceTypeError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.len() != 4 {
+            return Err(ResourceTypeError::BadInitialLength(value.len()));
+        }
+
+        let (cow, _, had_errors) = encoding_rs::MACINTOSH.encode(value);
+
+        if had_errors {
+            Err(ResourceTypeError::IllegalCharacters)
+        } else {
+            if cow.len() == 4 {
+                Ok(ResourceType::from(
+                    TryInto::<[u8; 4]>::try_into(cow.as_ref()).unwrap(),
+                ))
+            } else {
+                Err(ResourceTypeError::BadEncodedLength(cow.len()))
+            }
+        }
+    }
+}
+
+impl From<ResourceType> for String {
+    fn from(resource_type: ResourceType) -> Self {
+        encoding_rs::MACINTOSH
+            .decode(&resource_type.bytes)
+            .0
+            .to_string()
+    }
+}
+
+impl PartialEq<ResourceType> for &str {
+    fn eq(&self, other: &ResourceType) -> bool {
+        let (cow, _, _) = encoding_rs::MACINTOSH.encode(self);
+
+        return cow.as_ref() == &other.bytes;
+    }
+}
+
+impl PartialEq<ResourceType> for String {
+    fn eq(&self, other: &ResourceType) -> bool {
+        &self.as_str() == other
+    }
+}
+
+impl PartialEq<ResourceType> for [u8] {
+    fn eq(&self, other: &ResourceType) -> bool {
+        self == &other.bytes
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ResourceTypeError {
+    IllegalCharacters,
+    BadInitialLength(usize),
+    BadEncodedLength(usize),
+}
 
 /// Provides access to resources stored in the resource fork of a "classic" Mac file.
 pub struct ResourceFork<R: Read + Seek> {
@@ -346,18 +429,82 @@ mod test {
 
         assert_eq!(1, resource_fork.resources().count());
 
-        let resource = resource_fork.load_by_id(*b"STR#", 777)?;
+        let resource = resource_fork.load_by_id(ResourceType::try_from("STR#").unwrap(), 777)?;
         assert!(resource.data.len() > 0);
-        assert_eq!(b"STR#", &resource.metadata.resource_type);
+        assert_eq!("STR#", resource.metadata.resource_type);
         assert_eq!(777, resource.metadata.id);
         assert_eq!(Some(String::from("Example")), resource.metadata.name);
 
-        let resource = resource_fork.load_by_name(*b"STR#", String::from("Example"))?;
+        let resource = resource_fork.load_by_name(
+            ResourceType::try_from("STR#").unwrap(),
+            String::from("Example"),
+        )?;
         assert!(resource.data.len() > 0);
-        assert_eq!(b"STR#", &resource.metadata.resource_type);
+        assert_eq!("STR#", resource.metadata.resource_type);
         assert_eq!(777, resource.metadata.id);
         assert_eq!(Some(String::from("Example")), resource.metadata.name);
 
         Ok(())
+    }
+
+    #[test]
+    fn resource_type_from_slice() {
+        let bytes = b"__snd __";
+
+        assert_eq!(
+            ResourceType::from(*b"snd "),
+            ResourceType::try_from(&bytes[2..6]).unwrap()
+        );
+
+        assert_eq!(
+            ResourceTypeError::BadEncodedLength(3),
+            ResourceType::try_from(&bytes[2..5]).unwrap_err()
+        );
+    }
+
+    #[test]
+    fn resource_type_from_str() {
+        assert_eq!(
+            ResourceType::from(*b"snd "),
+            ResourceType::try_from("snd ").unwrap()
+        );
+
+        assert_eq!(
+            ResourceTypeError::BadInitialLength(5),
+            ResourceType::try_from("OH NO").unwrap_err()
+        );
+
+        assert_eq!(
+            ResourceTypeError::IllegalCharacters,
+            ResourceType::try_from("🤘").unwrap_err()
+        );
+    }
+
+    #[test]
+    fn resource_type_to_string() {
+        assert_eq!(
+            String::from("snd "),
+            String::from(ResourceType::from(*b"snd "))
+        );
+    }
+
+    #[test]
+    fn resource_partial_equal_string() {
+        assert_eq!(String::from("snd "), ResourceType::from(*b"snd "));
+        assert_ne!(String::from("nope"), ResourceType::from(*b"snd "));
+    }
+
+    #[test]
+    fn resource_partial_equal_str() {
+        assert_eq!("snd ", ResourceType::from(*b"snd "));
+        assert_ne!("nope", ResourceType::from(*b"snd "));
+    }
+
+    #[test]
+    fn resource_partial_equal_slice() {
+        let bytes = b"__snd __";
+
+        assert_eq!(bytes[2..6], ResourceType::from(*b"snd "));
+        assert_ne!(bytes[2..8], ResourceType::from(*b"snd "));
     }
 }
