@@ -33,7 +33,6 @@ impl<R: Read> Read for EncodedBinHexReader<R> {
 
         while bytes_copied == 0 && self.state != State::Done {
             let bytes_read = match self.source.read(buf) {
-                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
                 Ok(0) => return Err(Error::from(ErrorKind::UnexpectedEof)),
                 Ok(bytes_read) => bytes_read,

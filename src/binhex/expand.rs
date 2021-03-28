@@ -24,11 +24,7 @@ impl<R: Read> Read for BinHexExpander<R> {
         let mut bytes_copied = 0;
 
         loop {
-            let buf = match self.source.fill_buf() {
-                Ok(buf) => buf,
-                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            };
+            let buf = self.source.fill_buf()?;
 
             let event = match self.state {
                 State::Scan(_) => {
