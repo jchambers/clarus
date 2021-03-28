@@ -278,4 +278,30 @@ impl Resource {
 }
 
 #[cfg(test)]
-mod test {}
+mod test {
+    use super::*;
+    use std::io::Cursor;
+
+    const RSRC_DATA: &[u8] = include_bytes!("string-table.rsrc");
+
+    #[test]
+    fn load_resource() -> Result<(), ResourceError> {
+        let mut resource_fork = ResourceFork::new(Cursor::new(RSRC_DATA))?;
+
+        assert_eq!(1, resource_fork.resources().count());
+
+        let resource = resource_fork.load_by_id(*b"STR#", 777)?;
+        assert!(resource.data.len() > 0);
+        assert_eq!(b"STR#", &resource.metadata.resource_type);
+        assert_eq!(777, resource.metadata.id);
+        assert_eq!(Some(String::from("Example")), resource.metadata.name);
+
+        let resource = resource_fork.load_by_name(*b"STR#", String::from("Example"))?;
+        assert!(resource.data.len() > 0);
+        assert_eq!(b"STR#", &resource.metadata.resource_type);
+        assert_eq!(777, resource.metadata.id);
+        assert_eq!(Some(String::from("Example")), resource.metadata.name);
+
+        Ok(())
+    }
+}
