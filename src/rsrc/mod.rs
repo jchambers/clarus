@@ -112,7 +112,7 @@ pub struct ResourceFork<R: Read + Seek> {
     header: Header,
     attributes: u16,
     ids_by_name: HashMap<(ResourceType, String), u16>,
-    resources_by_id: HashMap<(ResourceType, u16), ResourceMapEntry>,
+    resources_by_id: HashMap<(ResourceType, u16), ResourceMetadata>,
 }
 
 impl<R: Read + Seek> ResourceFork<R> {
@@ -197,13 +197,11 @@ impl<R: Read + Seek> ResourceFork<R> {
 
                 resources_by_id.insert(
                     (type_entry.resource_type, reference_entry.id),
-                    ResourceMapEntry {
-                        metadata: ResourceMetadata {
-                            resource_type: type_entry.resource_type,
-                            id: reference_entry.id,
-                            name: maybe_name,
-                            attributes: reference_entry.attributes,
-                        },
+                    ResourceMetadata {
+                        resource_type: type_entry.resource_type,
+                        id: reference_entry.id,
+                        name: maybe_name,
+                        attributes: reference_entry.attributes,
                         data_offset: reference_entry.data_offset,
                     },
                 );
@@ -222,9 +220,7 @@ impl<R: Read + Seek> ResourceFork<R> {
     /// Returns an iterator over the metadata of all of the resources contained in this resource
     /// fork.
     pub fn resources(&self) -> impl Iterator<Item = &ResourceMetadata> {
-        self.resources_by_id
-            .values()
-            .map(|resource| &resource.metadata)
+        self.resources_by_id.values()
     }
 
     /// Loads data and metadata for the resource with the given type and ID.
@@ -241,25 +237,21 @@ impl<R: Read + Seek> ResourceFork<R> {
         &mut self,
         resource_type: ResourceType,
         id: u16,
-    ) -> Result<Resource, ResourceError> {
+        dest: &mut Vec<u8>,
+    ) -> Result<&ResourceMetadata, ResourceError> {
         if let Some(entry) = self.resources_by_id.get(&(resource_type, id)) {
-            let metadata = entry.metadata.clone();
-            let data = {
-                let mut len_bytes = [0; std::mem::size_of::<u32>()];
+            let mut len_bytes = [0; std::mem::size_of::<u32>()];
 
-                self.source.seek(SeekFrom::Start(
-                    (self.header.data_offset + entry.data_offset) as u64,
-                ))?;
+            self.source.seek(SeekFrom::Start(
+                (self.header.data_offset + entry.data_offset) as u64,
+            ))?;
 
-                self.source.read_exact(&mut len_bytes)?;
+            self.source.read_exact(&mut len_bytes)?;
 
-                let mut resource_data = vec![0; u32::from_be_bytes(len_bytes) as usize];
-                self.source.read_exact(&mut resource_data)?;
+            dest.resize(u32::from_be_bytes(len_bytes) as usize, 0);
+            self.source.read_exact(dest)?;
 
-                resource_data
-            };
-
-            Ok(Resource { data, metadata })
+            Ok(entry)
         } else {
             Err(ResourceError::NotFound)
         }
@@ -269,9 +261,10 @@ impl<R: Read + Seek> ResourceFork<R> {
         &mut self,
         resource_type: ResourceType,
         name: String,
-    ) -> Result<Resource, ResourceError> {
+        dest: &mut Vec<u8>,
+    ) -> Result<&ResourceMetadata, ResourceError> {
         if let Some(&id) = self.ids_by_name.get(&(resource_type, name)) {
-            self.load_by_id(resource_type, id)
+            self.load_by_id(resource_type, id, dest)
         } else {
             Err(ResourceError::NotFound)
         }
@@ -283,41 +276,13 @@ impl<R: Read + Seek> ResourceFork<R> {
     }
 }
 
-pub struct Resource {
-    data: Vec<u8>,
-    metadata: ResourceMetadata,
-}
-
-impl Resource {
-    pub fn resource_type(&self) -> ResourceType {
-        self.metadata.resource_type
-    }
-
-    pub fn id(&self) -> u16 {
-        self.metadata.id
-    }
-
-    pub fn name(&self) -> Option<&String> {
-        self.metadata.name.as_ref()
-    }
-
-    pub fn attributes(&self) -> u8 {
-        self.metadata.attributes
-    }
-
-    pub fn data(&self) -> &Vec<u8> {
-        &self.data
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ResourceMetadata {
     resource_type: ResourceType,
     id: u16,
     name: Option<String>,
-
-    // The Resource Map, page 38
     attributes: u8,
+    data_offset: u32,
 }
 
 impl ResourceMetadata {
@@ -333,6 +298,7 @@ impl ResourceMetadata {
         self.name.as_ref()
     }
 
+    // The Resource Map, page 38
     pub fn attributes(&self) -> u8 {
         self.attributes
     }
@@ -411,11 +377,6 @@ impl From<[u8; 12]> for ReferenceListEntry {
     }
 }
 
-struct ResourceMapEntry {
-    metadata: ResourceMetadata,
-    data_offset: u32,
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -429,20 +390,30 @@ mod test {
 
         assert_eq!(1, resource_fork.resources().count());
 
-        let resource = resource_fork.load_by_id(ResourceType::try_from("STR#").unwrap(), 777)?;
-        assert!(resource.data.len() > 0);
-        assert_eq!("STR#", resource.metadata.resource_type);
-        assert_eq!(777, resource.metadata.id);
-        assert_eq!(Some(String::from("Example")), resource.metadata.name);
+        let mut resource_data = vec![];
 
-        let resource = resource_fork.load_by_name(
+        let metadata = resource_fork.load_by_id(
+            ResourceType::try_from("STR#").unwrap(),
+            777,
+            &mut resource_data,
+        )?;
+
+        assert!(resource_data.len() > 0);
+        assert_eq!("STR#", metadata.resource_type);
+        assert_eq!(777, metadata.id);
+        assert_eq!(Some(String::from("Example")), metadata.name);
+
+        resource_data.clear();
+
+        let metadata = resource_fork.load_by_name(
             ResourceType::try_from("STR#").unwrap(),
             String::from("Example"),
+            &mut resource_data,
         )?;
-        assert!(resource.data.len() > 0);
-        assert_eq!("STR#", resource.metadata.resource_type);
-        assert_eq!(777, resource.metadata.id);
-        assert_eq!(Some(String::from("Example")), resource.metadata.name);
+        assert!(resource_data.len() > 0);
+        assert_eq!("STR#", metadata.resource_type);
+        assert_eq!(777, metadata.id);
+        assert_eq!(Some(String::from("Example")), metadata.name);
 
         Ok(())
     }
