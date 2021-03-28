@@ -14,32 +14,54 @@ pub struct ResourceFork<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> ResourceFork<R> {
-    pub fn resources(&self) -> impl Iterator<Item = ([u8; 4], u16, &Option<String>)> {
-        self.resources_by_id.values().map(|resource| {
-            (
-                resource.metadata.resource_type,
-                resource.metadata.id,
-                &resource.metadata.name,
-            )
-        })
+    /// Returns an iterator over the metadata of all of the resources contained in this resource
+    /// fork.
+    pub fn resources(&self) -> impl Iterator<Item = &ResourceMetadata> {
+        self.resources_by_id
+            .values()
+            .map(|resource| &resource.metadata)
     }
 
     pub fn load_by_id(
-        &self,
+        &mut self,
         resource_type: [u8; 4],
         id: u16,
-        dest: &mut [u8],
-    ) -> Result<ResourceMetadata, ResourceError> {
-        unimplemented!()
+    ) -> Result<Resource, ResourceError> {
+        if let Some(entry) = self.resources_by_id.get(&(resource_type, id)) {
+            let metadata = entry.metadata.clone();
+            let data = self.load(entry.data_offset)?;
+
+            Ok(Resource { data, metadata })
+        } else {
+            Err(ResourceError::NotFound)
+        }
     }
 
     pub fn load_by_name(
-        &self,
+        &mut self,
         resource_type: [u8; 4],
-        name: &String,
-        dest: &mut [u8],
-    ) -> Result<ResourceMetadata, ResourceError> {
-        unimplemented!()
+        name: String,
+    ) -> Result<Resource, ResourceError> {
+        if let Some(&id) = self.ids_by_name.get(&(resource_type, name)) {
+            self.load_by_id(resource_type, id)
+        } else {
+            Err(ResourceError::NotFound)
+        }
+    }
+
+    fn load(&mut self, data_offset: u32) -> Result<Vec<u8>, ResourceError> {
+        let mut len_bytes = [0; std::mem::size_of::<u32>()];
+
+        self.source.seek(SeekFrom::Start(
+            (self.header.data_offset + data_offset) as u64,
+        ))?;
+
+        self.source.read_exact(&mut len_bytes);
+
+        let mut resource_data = vec![0; u32::from_be_bytes(len_bytes) as usize];
+        self.source.read_exact(&mut resource_data)?;
+
+        Ok(resource_data)
     }
 }
 
@@ -226,12 +248,17 @@ struct ResourceMapEntry {
     data_offset: u32,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ResourceMetadata {
     resource_type: [u8; 4],
     id: u16,
     name: Option<String>,
     attributes: u8,
+}
+
+pub struct Resource {
+    data: Vec<u8>,
+    metadata: ResourceMetadata,
 }
 
 #[cfg(test)]
