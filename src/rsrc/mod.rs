@@ -11,103 +11,14 @@
 
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
-use std::io::{Error, Read, Seek, SeekFrom};
+use std::io::{self, Error, Read, Seek, SeekFrom};
 
 const NO_NAME: u16 = 0xffff;
-
-/// A resource type identifier.
-///
-/// Resource type identifiers are commonly represented as four-character ASCII strings in
-/// user-facing contexts. For details, please see the ["The Resource Type" section of "Inside
-/// Macintosh: More Macintosh
-/// Toolbox."](https://developer.apple.com/library/archive/documentation/mac/pdf/MoreMacintoshToolbox.pdf#page=72)
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ResourceType {
-    bytes: [u8; 4],
-}
-
-impl From<[u8; 4]> for ResourceType {
-    fn from(bytes: [u8; 4]) -> Self {
-        ResourceType { bytes }
-    }
-}
-
-impl TryFrom<&[u8]> for ResourceType {
-    type Error = ResourceTypeError;
-
-    fn try_from(slice: &[u8]) -> Result<Self, Self::Error> {
-        if slice.len() == 4 {
-            Ok(ResourceType::from(
-                TryInto::<[u8; 4]>::try_into(slice).unwrap(),
-            ))
-        } else {
-            Err(ResourceTypeError::BadEncodedLength(slice.len()))
-        }
-    }
-}
-
-impl TryFrom<&str> for ResourceType {
-    type Error = ResourceTypeError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        if value.len() != 4 {
-            return Err(ResourceTypeError::BadInitialLength(value.len()));
-        }
-
-        let (cow, _, had_errors) = encoding_rs::MACINTOSH.encode(value);
-
-        if had_errors {
-            Err(ResourceTypeError::IllegalCharacters)
-        } else if cow.len() == 4 {
-            Ok(ResourceType::from(
-                TryInto::<[u8; 4]>::try_into(cow.as_ref()).unwrap(),
-            ))
-        } else {
-            Err(ResourceTypeError::BadEncodedLength(cow.len()))
-        }
-    }
-}
-
-impl From<ResourceType> for String {
-    fn from(resource_type: ResourceType) -> Self {
-        encoding_rs::MACINTOSH
-            .decode(&resource_type.bytes)
-            .0
-            .to_string()
-    }
-}
-
-impl PartialEq<ResourceType> for &str {
-    fn eq(&self, other: &ResourceType) -> bool {
-        let (cow, _, _) = encoding_rs::MACINTOSH.encode(self);
-
-        return cow.as_ref() == other.bytes;
-    }
-}
-
-impl PartialEq<ResourceType> for String {
-    fn eq(&self, other: &ResourceType) -> bool {
-        &self.as_str() == other
-    }
-}
-
-impl PartialEq<ResourceType> for [u8] {
-    fn eq(&self, other: &ResourceType) -> bool {
-        self == other.bytes
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub enum ResourceTypeError {
-    IllegalCharacters,
-    BadInitialLength(usize),
-    BadEncodedLength(usize),
-}
 
 /// Provides access to resources stored in the resource fork of a "classic" Mac file.
 pub struct ResourceFork<R: Read + Seek> {
     source: R,
-    header: Header,
+    header: ResourceForkHeader,
     attributes: u16,
     ids_by_name: HashMap<(ResourceType, String), u16>,
     resources_by_id: HashMap<(ResourceType, u16), ResourceMetadata>,
@@ -120,7 +31,7 @@ impl<R: Read + Seek> ResourceFork<R> {
             let mut header_buf = [0; 16];
             source.read_exact(&mut header_buf)?;
 
-            Header::from(header_buf)
+            ResourceForkHeader::from(header_buf)
         };
 
         source.seek(SeekFrom::Start((header.map_offset) as u64))?;
@@ -246,7 +157,8 @@ impl<R: Read + Seek> ResourceFork<R> {
         self.resources_by_id.values()
     }
 
-    /// Loads data and metadata for the resource with the given type and ID.
+    /// Loads data and metadata for the resource with the given type and ID. The provided `dest` is
+    /// resized to the size of the loaded resource, and resource data is copied into `dest`.
     ///
     /// Resources are uniquely identified by their type and ID (or name, if present; see
     /// [`ResourceFork::load_by_name`]). Multiple resources may have the same ID as long as they are
@@ -254,8 +166,9 @@ impl<R: Read + Seek> ResourceFork<R> {
     ///
     /// # Errors
     ///
-    /// This method returns an error if no resource could be found for the given type/ID or if the
-    /// underlying reader returns an error while reading resource data.
+    /// This method returns an error if no resource could be found for the given type/ID, if the
+    /// resource data appears to be corrupt, or if the underlying reader returns an error while
+    /// reading resource data.
     pub fn load_by_id(
         &mut self,
         resource_type: ResourceType,
@@ -291,6 +204,19 @@ impl<R: Read + Seek> ResourceFork<R> {
         }
     }
 
+    /// Loads data and metadata for the resource with the given type and name. The provided `dest`
+    /// is resized to the size of the loaded resource, and resource data is copied into `dest`.
+    ///
+    /// Resources are uniquely identified by their type and name (or ID; see
+    /// [`ResourceFork::load_by_id`]). Resources may or may not have a name. If a resource does not
+    /// have a name, it can only be loaded by ID. Multiple resources may have the same non-empty
+    /// name as long as they are not of the same type.
+    ///
+    /// # Errors
+    ///
+    /// This method returns an error if no resource could be found for the given type/name, if the
+    /// resource data appears to be corrupt, or if the underlying reader returns an error while
+    /// reading resource data.
     pub fn load_by_name(
         &mut self,
         resource_type: ResourceType,
@@ -304,12 +230,115 @@ impl<R: Read + Seek> ResourceFork<R> {
         }
     }
 
-    // Getting and Setting Resource Fork Attributes, 146
+    /// Returns the "attributes" bitfield for this resource fork. Attributes are cues to the Mac OS
+    /// Resource Manager, and are generally not needed for new use cases. They are provided here
+    /// in the interest of preserving history.
+    ///
+    /// For a detailed description of the attribute bitfield, please see the ["Getting and Setting
+    /// Resource Fork Attributes" section of "Inside Macintosh: More Macintosh
+    /// Toolbox."](https://developer.apple.com/library/archive/documentation/mac/pdf/MoreMacintoshToolbox.pdf#page=146)
     pub fn attributes(&self) -> u16 {
         self.attributes
     }
 }
 
+/// A resource type identifier.
+///
+/// Resource type identifiers are commonly represented as four-character ASCII strings in
+/// user-facing contexts. For details, please see the ["The Resource Type" section of "Inside
+/// Macintosh: More Macintosh
+/// Toolbox."](https://developer.apple.com/library/archive/documentation/mac/pdf/MoreMacintoshToolbox.pdf#page=72)
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ResourceType {
+    bytes: [u8; 4],
+}
+
+impl From<[u8; 4]> for ResourceType {
+    fn from(bytes: [u8; 4]) -> Self {
+        ResourceType { bytes }
+    }
+}
+
+impl TryFrom<&[u8]> for ResourceType {
+    type Error = ResourceTypeError;
+
+    fn try_from(slice: &[u8]) -> Result<Self, Self::Error> {
+        if slice.len() == 4 {
+            Ok(ResourceType::from(
+                TryInto::<[u8; 4]>::try_into(slice).unwrap(),
+            ))
+        } else {
+            Err(ResourceTypeError::BadLength(slice.len()))
+        }
+    }
+}
+
+impl TryFrom<&str> for ResourceType {
+    type Error = ResourceTypeError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.len() != 4 {
+            return Err(ResourceTypeError::BadLength(value.len()));
+        }
+
+        let (cow, _, had_errors) = encoding_rs::MACINTOSH.encode(value);
+
+        if had_errors {
+            Err(ResourceTypeError::IllegalCharacters)
+        } else if cow.len() == 4 {
+            Ok(ResourceType::from(
+                TryInto::<[u8; 4]>::try_into(cow.as_ref()).unwrap(),
+            ))
+        } else {
+            Err(ResourceTypeError::IllegalCharacters)
+        }
+    }
+}
+
+impl From<ResourceType> for String {
+    fn from(resource_type: ResourceType) -> Self {
+        encoding_rs::MACINTOSH
+            .decode(&resource_type.bytes)
+            .0
+            .to_string()
+    }
+}
+
+impl PartialEq<ResourceType> for &str {
+    fn eq(&self, other: &ResourceType) -> bool {
+        let (cow, _, _) = encoding_rs::MACINTOSH.encode(self);
+
+        return cow.as_ref() == other.bytes;
+    }
+}
+
+impl PartialEq<ResourceType> for String {
+    fn eq(&self, other: &ResourceType) -> bool {
+        &self.as_str() == other
+    }
+}
+
+impl PartialEq<ResourceType> for [u8] {
+    fn eq(&self, other: &ResourceType) -> bool {
+        self == other.bytes
+    }
+}
+
+/// The error type for operations on `ResourceType` instances.
+#[derive(Debug, Eq, PartialEq)]
+pub enum ResourceTypeError {
+    /// A resource type could not be constructed from the given string because the string contained
+    /// characters that could not be represented as a single byte in the Macintosh character
+    /// encoding.
+    IllegalCharacters,
+
+    /// The given string was not exactly four characters long.
+    BadLength(usize),
+}
+
+/// Metadata associated with a specific resource.
+///
+/// All resources have a type and ID and may also have a name.
 #[derive(Clone, Debug)]
 pub struct ResourceMetadata {
     resource_type: ResourceType,
@@ -320,53 +349,75 @@ pub struct ResourceMetadata {
 }
 
 impl ResourceMetadata {
+    /// Returns the type of this resource.
     pub fn resource_type(&self) -> ResourceType {
         self.resource_type
     }
 
+    /// Returns the ID of this resource.
+    ///
+    /// IDs uniquely identify resources _within a specific type._ Resources of different types may
+    /// have the same ID without conflict.
     pub fn id(&self) -> u16 {
         self.id
     }
 
+    /// Returns the name of this resource.
+    ///
+    /// Names, if present, uniquely identify resources _within a specific type._ Resources of
+    /// different types may have the same name without conflict.
     pub fn name(&self) -> Option<&String> {
         self.name.as_ref()
     }
 
-    // The Resource Map, page 38
+    /// Returns the "attributes" bitfield for this resource. Attributes are cues to the Mac OS
+    /// Resource Manager, and are generally not needed for new use cases. They are provided here
+    /// in the interest of preserving history.
+    ///
+    /// For a detailed description of the attribute bitfield, please see the ["The Resource Map"
+    /// section of "Inside Macintosh: More Macintosh
+    /// Toolbox."](https://developer.apple.com/library/archive/documentation/mac/pdf/MoreMacintoshToolbox.pdf#page=38)
     pub fn attributes(&self) -> u8 {
         self.attributes
     }
 }
 
+/// The error type for operations on resource forks.
 #[derive(Debug)]
 pub enum ResourceError {
-    IoError,
+    /// Loading resources failed due to an underlying IO error.
+    IoError(io::ErrorKind),
+
+    /// No resource with the given type/ID (or name) was found in this resource fork.
     NotFound,
+
+    /// This resource fork's resource map was corrupt and could not be loaded.
     CorruptResourceMap,
+
+    /// The data for a specific resource was corrupt and could not be loaded.
     CorruptResourceData,
 }
 
 impl From<std::io::Error> for ResourceError {
-    fn from(_: Error) -> Self {
-        // TODO
-        ResourceError::IoError
+    fn from(error: Error) -> Self {
+        ResourceError::IoError(error.kind())
     }
 }
 
-struct Header {
+struct ResourceForkHeader {
     data_offset: u32,
     map_offset: u32,
     _data_len: u32,
     map_len: u32,
 }
 
-impl From<[u8; 16]> for Header {
+impl From<[u8; 16]> for ResourceForkHeader {
     fn from(bytes: [u8; 16]) -> Self {
         let (data_offset_bytes, bytes) = bytes.split_at(std::mem::size_of::<u32>());
         let (map_offset_bytes, bytes) = bytes.split_at(std::mem::size_of::<u32>());
         let (data_len_bytes, map_len_bytes) = bytes.split_at(std::mem::size_of::<u32>());
 
-        Header {
+        ResourceForkHeader {
             data_offset: u32::from_be_bytes(data_offset_bytes.try_into().unwrap()),
             map_offset: u32::from_be_bytes(map_offset_bytes.try_into().unwrap()),
             _data_len: u32::from_be_bytes(data_len_bytes.try_into().unwrap()),
@@ -464,7 +515,7 @@ mod test {
         );
 
         assert_eq!(
-            ResourceTypeError::BadEncodedLength(3),
+            ResourceTypeError::BadLength(3),
             ResourceType::try_from(&bytes[2..5]).unwrap_err()
         );
     }
@@ -477,7 +528,7 @@ mod test {
         );
 
         assert_eq!(
-            ResourceTypeError::BadInitialLength(5),
+            ResourceTypeError::BadLength(5),
             ResourceType::try_from("OH NO").unwrap_err()
         );
 
