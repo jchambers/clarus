@@ -5,6 +5,10 @@
 //! of us today). The resource fork contained a structured map of well-defined data structures that
 //! represented things like UI elements, sounds, and images.
 //!
+//! Current filesystems don't have a notion of a resource fork; resource forks are now generally
+//! represented as separate files, as filesystem-level metadata, or sometimes in archives (like
+//! BinHex) that encode both forks of a file.
+//!
 //! For a complete overview of resources, please see the ["Resource Manager" chapter of "Inside
 //! Macintosh: More Macintosh
 //! Toolbox"](https://developer.apple.com/library/archive/documentation/mac/pdf/MoreMacintoshToolbox.pdf)
@@ -26,6 +30,25 @@ pub struct ResourceFork<R: Read + Seek> {
 
 impl<R: Read + Seek> ResourceFork<R> {
     /// Creates a new `ResourceFork` that loads resources from the given source.
+    ///
+    /// # Errors
+    ///
+    /// This method will return an error if a valid resource map could not be loaded from the given
+    /// source.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::fs::File;
+    /// use clarus::rsrc::{ResourceError, ResourceFork};
+    ///
+    /// fn main() -> Result<(), ResourceError> {
+    ///     let resource_file = File::open("example.rsrc")?;
+    ///     let resource_fork = ResourceFork::new(resource_file)?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn new(mut source: R) -> Result<Self, ResourceError> {
         let header = {
             let mut header_buf = [0; 16];
@@ -153,6 +176,25 @@ impl<R: Read + Seek> ResourceFork<R> {
 
     /// Returns an iterator over the metadata of all of the resources contained in this resource
     /// fork.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::fs::File;
+    /// use clarus::rsrc::{ResourceError, ResourceFork};
+    ///
+    /// fn main() -> Result<(), ResourceError> {
+    ///     let resource_file = File::open("example.rsrc")?;
+    ///     let resource_fork = ResourceFork::new(resource_file)?;
+    ///
+    ///     println!("This resource fork contains the following entries:");
+    ///
+    ///     resource_fork.resources()
+    ///         .for_each(|metadata| println!("\t{:?}", metadata));
+    ///
+    ///   Ok(())
+    /// }
+    /// ```
     pub fn resources(&self) -> impl Iterator<Item = &ResourceMetadata> {
         self.resources_by_id.values()
     }
@@ -169,6 +211,29 @@ impl<R: Read + Seek> ResourceFork<R> {
     /// This method returns an error if no resource could be found for the given type/ID, if the
     /// resource data appears to be corrupt, or if the underlying reader returns an error while
     /// reading resource data.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::convert::TryFrom;
+    /// use std::fs::File;
+    /// use clarus::rsrc::{ResourceError, ResourceFork, ResourceType};
+    ///
+    /// fn main() -> Result<(), ResourceError> {
+    ///     let resource_file = File::open("example.rsrc")?;
+    ///     let mut resource_fork = ResourceFork::new(resource_file)?;
+    ///
+    ///     let mut data = Vec::new();
+    ///     let metadata = resource_fork.load_by_id(
+    ///         ResourceType::try_from("snd ").unwrap(),
+    ///         128,
+    ///         &mut data);
+    ///
+    ///     println!("Loaded {:?} ({} bytes)", metadata, data.len());
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn load_by_id(
         &mut self,
         resource_type: ResourceType,
@@ -217,6 +282,29 @@ impl<R: Read + Seek> ResourceFork<R> {
     /// This method returns an error if no resource could be found for the given type/name, if the
     /// resource data appears to be corrupt, or if the underlying reader returns an error while
     /// reading resource data.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::convert::TryFrom;
+    /// use std::fs::File;
+    /// use clarus::rsrc::{ResourceError, ResourceFork, ResourceType};
+    ///
+    /// fn main() -> Result<(), ResourceError> {
+    ///     let resource_file = File::open("example.rsrc")?;
+    ///     let mut resource_fork = ResourceFork::new(resource_file)?;
+    ///
+    ///     let mut data = Vec::new();
+    ///     let metadata = resource_fork.load_by_name(
+    ///          ResourceType::try_from("snd ").unwrap(),
+    ///          String::from("Simple beep"),
+    ///          &mut data);
+    ///
+    ///     println!("Loaded {:?} ({} bytes)", metadata, data.len());
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn load_by_name(
         &mut self,
         resource_type: ResourceType,
