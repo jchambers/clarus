@@ -21,6 +21,7 @@ fn extract_small(bench: &mut Bencher) {
 
     bench.iter(|| {
         BinHexArchive::new(Cursor::new(BINHEX_SMALL))
+            .expect("Failed to read archive header")
             .extract(&mut data_sink, &mut rsrc_sink)
             .expect("Failed to extract archive");
     });
@@ -32,6 +33,7 @@ fn extract_large(bench: &mut Bencher) {
 
     bench.iter(|| {
         BinHexArchive::new(Cursor::new(BINHEX_LARGE))
+            .expect("Failed to read archive header")
             .extract(&mut data_sink, &mut rsrc_sink)
             .expect("Failed to extract archive");
     });
