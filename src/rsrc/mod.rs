@@ -125,7 +125,12 @@ impl<R: Read + Seek> ResourceFork<R> {
 
         source.seek(SeekFrom::Start((header.map_offset) as u64))?;
 
-        // TODO Verify that map_len is reasonable and bail out if not
+        // A resource fork with no resources should still have a resource map that's at least 30
+        // bytes long
+        if header.map_len < 30 {
+            return Err(ResourceError::CorruptResourceMap);
+        }
+
         let mut map_bytes = vec![0; header.map_len as usize];
         source.read_exact(&mut map_bytes)?;
 
@@ -148,13 +153,17 @@ impl<R: Read + Seek> ResourceFork<R> {
         // The type count in the resource fork is "number of types in the map minus 1"
         let type_count = u16::from_be_bytes(type_count_bytes.try_into().unwrap()) + 1;
 
-        // TODO Verify that the type list is long enough; bail if not
+        // The map length must be at least 30 bytes (for the header, including the type count), then
+        // 8 bytes for each item in the type list
+        if header.map_len < 30 + (8 * type_count as u32) {
+            return Err(ResourceError::CorruptResourceMap);
+        }
 
         let mut ids_by_name = HashMap::new();
         let mut resources_by_id = HashMap::new();
 
         for t in 0..type_count {
-            // Plus 2 because the type count technically counts as part of the type list
+            // Plus 2 because the type count is technically part of the type list
             let type_offset = (type_list_offset + 2 + (t * 8)) as usize;
 
             let type_entry_bytes: [u8; 8] =
@@ -162,9 +171,14 @@ impl<R: Read + Seek> ResourceFork<R> {
             let type_entry = TypeListEntry::from(type_entry_bytes);
 
             for r in 0..type_entry.count {
-                // TODO Verify that there's enough remaining data at offset
                 let reference_offset =
                     (type_list_offset + type_entry.reference_list_offset + (r * 12)) as usize;
+
+                // The reference list entry is 12 bytes; we expect to have at least that many still
+                // to read at the given offset
+                if header.map_len < reference_offset as u32 + 12 {
+                    return Err(ResourceError::CorruptResourceMap);
+                }
 
                 let reference_entry_bytes: [u8; 12] = map_bytes
                     [reference_offset..reference_offset + 12]
@@ -176,11 +190,22 @@ impl<R: Read + Seek> ResourceFork<R> {
                 let maybe_name = if reference_entry.name_list_offset == NO_NAME {
                     None
                 } else {
-                    // TODO Verify that name length byte is reachable
+                    // Make sure we have at least one byte to read at the start of the name entry
+                    if header.map_len < (name_list_offset + reference_entry.name_list_offset) as u32
+                    {
+                        return Err(ResourceError::CorruptResourceMap);
+                    }
+
                     let name_len =
                         map_bytes[(name_list_offset + reference_entry.name_list_offset) as usize];
 
-                    // TODO Verify that we have name_len bytes remaining
+                    // ...and that we have enough bytes left to read the whole name
+                    if header.map_len
+                        < (name_list_offset + reference_entry.name_list_offset + 1) as u32
+                    {
+                        return Err(ResourceError::CorruptResourceMap);
+                    }
+
                     let name_start =
                         (name_list_offset + reference_entry.name_list_offset + 1) as usize;
                     let name_bytes = &map_bytes[name_start..name_start + name_len as usize];
@@ -238,6 +263,11 @@ impl<R: Read + Seek> ResourceFork<R> {
         dest: &mut Vec<u8>,
     ) -> Result<&ResourceMetadata, ResourceError> {
         if let Some(entry) = self.resources_by_id.get(&(resource_type, id)) {
+            // Make sure we can at least load the data length bytes
+            if self.header._data_len < entry.data_offset + 4 {
+                return Err(ResourceError::CorruptResourceData);
+            }
+
             let mut len_bytes = [0; std::mem::size_of::<u32>()];
 
             self.source.seek(SeekFrom::Start(
@@ -245,8 +275,14 @@ impl<R: Read + Seek> ResourceFork<R> {
             ))?;
 
             self.source.read_exact(&mut len_bytes)?;
+            let resource_len = u32::from_be_bytes(len_bytes);
 
-            dest.resize(u32::from_be_bytes(len_bytes) as usize, 0);
+            // ...and make sure we can load the rest of the resource data, too
+            if self.header._data_len < entry.data_offset + 4 + resource_len {
+                return Err(ResourceError::CorruptResourceData);
+            }
+
+            dest.resize(resource_len as usize, 0);
             self.source.read_exact(dest)?;
 
             Ok(entry)
@@ -306,6 +342,8 @@ impl ResourceMetadata {
 pub enum ResourceError {
     IoError,
     NotFound,
+    CorruptResourceMap,
+    CorruptResourceData,
 }
 
 impl From<std::io::Error> for ResourceError {
