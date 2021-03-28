@@ -6,11 +6,14 @@ use std::io::{Error, Read, Seek, SeekFrom};
 
 const NO_NAME: u16 = 0xffff;
 
+pub type ResourceType = [u8; 4];
+
 pub struct ResourceFork<R: Read + Seek> {
     source: R,
     header: Header,
-    ids_by_name: HashMap<([u8; 4], String), u16>,
-    resources_by_id: HashMap<([u8; 4], u16), ResourceMapEntry>,
+    attributes: u16,
+    ids_by_name: HashMap<(ResourceType, String), u16>,
+    resources_by_id: HashMap<(ResourceType, u16), ResourceMapEntry>,
 }
 
 impl<R: Read + Seek> ResourceFork<R> {
@@ -24,12 +27,25 @@ impl<R: Read + Seek> ResourceFork<R> {
 
     pub fn load_by_id(
         &mut self,
-        resource_type: [u8; 4],
+        resource_type: ResourceType,
         id: u16,
     ) -> Result<Resource, ResourceError> {
         if let Some(entry) = self.resources_by_id.get(&(resource_type, id)) {
             let metadata = entry.metadata.clone();
-            let data = self.load(entry.data_offset)?;
+            let data = {
+                let mut len_bytes = [0; std::mem::size_of::<u32>()];
+
+                self.source.seek(SeekFrom::Start(
+                    (self.header.data_offset + entry.data_offset) as u64,
+                ))?;
+
+                self.source.read_exact(&mut len_bytes)?;
+
+                let mut resource_data = vec![0; u32::from_be_bytes(len_bytes) as usize];
+                self.source.read_exact(&mut resource_data)?;
+
+                resource_data
+            };
 
             Ok(Resource { data, metadata })
         } else {
@@ -39,7 +55,7 @@ impl<R: Read + Seek> ResourceFork<R> {
 
     pub fn load_by_name(
         &mut self,
-        resource_type: [u8; 4],
+        resource_type: ResourceType,
         name: String,
     ) -> Result<Resource, ResourceError> {
         if let Some(&id) = self.ids_by_name.get(&(resource_type, name)) {
@@ -49,19 +65,8 @@ impl<R: Read + Seek> ResourceFork<R> {
         }
     }
 
-    fn load(&mut self, data_offset: u32) -> Result<Vec<u8>, ResourceError> {
-        let mut len_bytes = [0; std::mem::size_of::<u32>()];
-
-        self.source.seek(SeekFrom::Start(
-            (self.header.data_offset + data_offset) as u64,
-        ))?;
-
-        self.source.read_exact(&mut len_bytes);
-
-        let mut resource_data = vec![0; u32::from_be_bytes(len_bytes) as usize];
-        self.source.read_exact(&mut resource_data)?;
-
-        Ok(resource_data)
+    pub fn attributes(&self) -> u16 {
+        self.attributes
     }
 }
 
@@ -102,7 +107,7 @@ impl<R: Read + Seek> ResourceFork<R> {
         // TODO Verify that the type list is long enough; bail if not
 
         let mut ids_by_name = HashMap::new();
-        let mut metadata_by_id = HashMap::new();
+        let mut resources_by_id = HashMap::new();
 
         for t in 0..type_count {
             // Plus 2 because the type count technically counts as part of the type list
@@ -144,7 +149,7 @@ impl<R: Read + Seek> ResourceFork<R> {
                         .insert((type_entry.resource_type, name.clone()), reference_entry.id);
                 }
 
-                metadata_by_id.insert(
+                resources_by_id.insert(
                     (type_entry.resource_type, reference_entry.id),
                     ResourceMapEntry {
                         metadata: ResourceMetadata {
@@ -162,14 +167,15 @@ impl<R: Read + Seek> ResourceFork<R> {
         Ok(ResourceFork {
             source,
             header,
+            attributes,
             ids_by_name,
-            resources_by_id: metadata_by_id,
+            resources_by_id,
         })
     }
 }
 
 struct TypeListEntry {
-    resource_type: [u8; 4],
+    resource_type: ResourceType,
     count: u16,
     reference_list_offset: u16,
 }
@@ -250,7 +256,7 @@ struct ResourceMapEntry {
 
 #[derive(Clone, Debug)]
 pub struct ResourceMetadata {
-    resource_type: [u8; 4],
+    resource_type: ResourceType,
     id: u16,
     name: Option<String>,
     attributes: u8,
@@ -259,6 +265,16 @@ pub struct ResourceMetadata {
 pub struct Resource {
     data: Vec<u8>,
     metadata: ResourceMetadata,
+}
+
+impl Resource {
+    pub fn data(&self) -> &Vec<u8> {
+        &self.data
+    }
+
+    pub fn metadata(&self) -> &ResourceMetadata {
+        &self.metadata
+    }
 }
 
 #[cfg(test)]
