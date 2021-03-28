@@ -58,14 +58,12 @@ impl TryFrom<&str> for ResourceType {
 
         if had_errors {
             Err(ResourceTypeError::IllegalCharacters)
+        } else if cow.len() == 4 {
+            Ok(ResourceType::from(
+                TryInto::<[u8; 4]>::try_into(cow.as_ref()).unwrap(),
+            ))
         } else {
-            if cow.len() == 4 {
-                Ok(ResourceType::from(
-                    TryInto::<[u8; 4]>::try_into(cow.as_ref()).unwrap(),
-                ))
-            } else {
-                Err(ResourceTypeError::BadEncodedLength(cow.len()))
-            }
+            Err(ResourceTypeError::BadEncodedLength(cow.len()))
         }
     }
 }
@@ -83,7 +81,7 @@ impl PartialEq<ResourceType> for &str {
     fn eq(&self, other: &ResourceType) -> bool {
         let (cow, _, _) = encoding_rs::MACINTOSH.encode(self);
 
-        return cow.as_ref() == &other.bytes;
+        return cow.as_ref() == other.bytes;
     }
 }
 
@@ -95,7 +93,7 @@ impl PartialEq<ResourceType> for String {
 
 impl PartialEq<ResourceType> for [u8] {
     fn eq(&self, other: &ResourceType) -> bool {
-        self == &other.bytes
+        self == other.bytes
     }
 }
 
