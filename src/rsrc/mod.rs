@@ -1,4 +1,13 @@
-// https://developer.apple.com/library/archive/documentation/mac/pdf/MoreMacintoshToolbox.pdf
+//! Extract resource data from resource forks of "classic" Macintosh files.
+//!
+//! Classic Mac files were divided into two "forks:" the data fork and the resource fork. The data
+//! fork contained arbitrary, application-defined data (like single-stream files familiar to most
+//! of us today). The resource fork contained a structured map of well-defined data structures that
+//! represented things like UI elements, sounds, and images.
+//!
+//! For a complete overview of resources, please see the ["Resource Manager" chapter of "Inside
+//! Macintosh: More Macintosh
+//! Toolbox"](https://developer.apple.com/library/archive/documentation/mac/pdf/MoreMacintoshToolbox.pdf)
 
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -6,8 +15,15 @@ use std::io::{Error, Read, Seek, SeekFrom};
 
 const NO_NAME: u16 = 0xffff;
 
+/// A resource type identifier.
+///
+/// Resource type identifiers are commonly represented as four-character ASCII strings in
+/// user-facing contexts. For details, please see the ["The Resource Type" section of "Inside
+/// Macintosh: More Macintosh
+/// Toolbox."](https://developer.apple.com/library/archive/documentation/mac/pdf/MoreMacintoshToolbox.pdf#page=72)
 pub type ResourceType = [u8; 4];
 
+/// Provides access to resources stored in the resource fork of a "classic" Mac file.
 pub struct ResourceFork<R: Read + Seek> {
     source: R,
     header: Header,
@@ -17,60 +33,7 @@ pub struct ResourceFork<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> ResourceFork<R> {
-    /// Returns an iterator over the metadata of all of the resources contained in this resource
-    /// fork.
-    pub fn resources(&self) -> impl Iterator<Item = &ResourceMetadata> {
-        self.resources_by_id
-            .values()
-            .map(|resource| &resource.metadata)
-    }
-
-    pub fn load_by_id(
-        &mut self,
-        resource_type: ResourceType,
-        id: u16,
-    ) -> Result<Resource, ResourceError> {
-        if let Some(entry) = self.resources_by_id.get(&(resource_type, id)) {
-            let metadata = entry.metadata.clone();
-            let data = {
-                let mut len_bytes = [0; std::mem::size_of::<u32>()];
-
-                self.source.seek(SeekFrom::Start(
-                    (self.header.data_offset + entry.data_offset) as u64,
-                ))?;
-
-                self.source.read_exact(&mut len_bytes)?;
-
-                let mut resource_data = vec![0; u32::from_be_bytes(len_bytes) as usize];
-                self.source.read_exact(&mut resource_data)?;
-
-                resource_data
-            };
-
-            Ok(Resource { data, metadata })
-        } else {
-            Err(ResourceError::NotFound)
-        }
-    }
-
-    pub fn load_by_name(
-        &mut self,
-        resource_type: ResourceType,
-        name: String,
-    ) -> Result<Resource, ResourceError> {
-        if let Some(&id) = self.ids_by_name.get(&(resource_type, name)) {
-            self.load_by_id(resource_type, id)
-        } else {
-            Err(ResourceError::NotFound)
-        }
-    }
-
-    pub fn attributes(&self) -> u16 {
-        self.attributes
-    }
-}
-
-impl<R: Read + Seek> ResourceFork<R> {
+    /// Creates a new `ResourceFork` that loads resources from the given source.
     pub fn new(mut source: R) -> Result<Self, ResourceError> {
         let header = {
             let mut header_buf = [0; 16];
@@ -172,6 +135,159 @@ impl<R: Read + Seek> ResourceFork<R> {
             resources_by_id,
         })
     }
+
+    /// Returns an iterator over the metadata of all of the resources contained in this resource
+    /// fork.
+    pub fn resources(&self) -> impl Iterator<Item = &ResourceMetadata> {
+        self.resources_by_id
+            .values()
+            .map(|resource| &resource.metadata)
+    }
+
+    /// Loads data and metadata for the resource with the given type and ID.
+    ///
+    /// Resources are uniquely identified by their type and ID (or name, if present; see
+    /// [`ResourceFork::load_by_name`]). Multiple resources may have the same ID as long as they are
+    /// not of the same type.
+    ///
+    /// # Errors
+    ///
+    /// This method returns an error if no resource could be found for the given type/ID or if the
+    /// underlying reader returns an error while reading resource data.
+    pub fn load_by_id(
+        &mut self,
+        resource_type: ResourceType,
+        id: u16,
+    ) -> Result<Resource, ResourceError> {
+        if let Some(entry) = self.resources_by_id.get(&(resource_type, id)) {
+            let metadata = entry.metadata.clone();
+            let data = {
+                let mut len_bytes = [0; std::mem::size_of::<u32>()];
+
+                self.source.seek(SeekFrom::Start(
+                    (self.header.data_offset + entry.data_offset) as u64,
+                ))?;
+
+                self.source.read_exact(&mut len_bytes)?;
+
+                let mut resource_data = vec![0; u32::from_be_bytes(len_bytes) as usize];
+                self.source.read_exact(&mut resource_data)?;
+
+                resource_data
+            };
+
+            Ok(Resource { data, metadata })
+        } else {
+            Err(ResourceError::NotFound)
+        }
+    }
+
+    pub fn load_by_name(
+        &mut self,
+        resource_type: ResourceType,
+        name: String,
+    ) -> Result<Resource, ResourceError> {
+        if let Some(&id) = self.ids_by_name.get(&(resource_type, name)) {
+            self.load_by_id(resource_type, id)
+        } else {
+            Err(ResourceError::NotFound)
+        }
+    }
+
+    // Getting and Setting Resource Fork Attributes, 146
+    pub fn attributes(&self) -> u16 {
+        self.attributes
+    }
+}
+
+pub struct Resource {
+    data: Vec<u8>,
+    metadata: ResourceMetadata,
+}
+
+impl Resource {
+    pub fn resource_type(&self) -> ResourceType {
+        self.metadata.resource_type
+    }
+
+    pub fn id(&self) -> u16 {
+        self.metadata.id
+    }
+
+    pub fn name(&self) -> Option<&String> {
+        self.metadata.name.as_ref()
+    }
+
+    pub fn attributes(&self) -> u8 {
+        self.metadata.attributes
+    }
+
+    pub fn data(&self) -> &Vec<u8> {
+        &self.data
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResourceMetadata {
+    resource_type: ResourceType,
+    id: u16,
+    name: Option<String>,
+
+    // The Resource Map, page 38
+    attributes: u8,
+}
+
+impl ResourceMetadata {
+    pub fn resource_type(&self) -> ResourceType {
+        self.resource_type
+    }
+
+    pub fn id(&self) -> u16 {
+        self.id
+    }
+
+    pub fn name(&self) -> Option<&String> {
+        self.name.as_ref()
+    }
+
+    pub fn attributes(&self) -> u8 {
+        self.attributes
+    }
+}
+
+#[derive(Debug)]
+pub enum ResourceError {
+    IoError,
+    NotFound,
+}
+
+impl From<std::io::Error> for ResourceError {
+    fn from(_: Error) -> Self {
+        // TODO
+        ResourceError::IoError
+    }
+}
+
+struct Header {
+    data_offset: u32,
+    map_offset: u32,
+    _data_len: u32,
+    map_len: u32,
+}
+
+impl From<[u8; 16]> for Header {
+    fn from(bytes: [u8; 16]) -> Self {
+        let (data_offset_bytes, bytes) = bytes.split_at(std::mem::size_of::<u32>());
+        let (map_offset_bytes, bytes) = bytes.split_at(std::mem::size_of::<u32>());
+        let (data_len_bytes, map_len_bytes) = bytes.split_at(std::mem::size_of::<u32>());
+
+        Header {
+            data_offset: u32::from_be_bytes(data_offset_bytes.try_into().unwrap()),
+            map_offset: u32::from_be_bytes(map_offset_bytes.try_into().unwrap()),
+            _data_len: u32::from_be_bytes(data_len_bytes.try_into().unwrap()),
+            map_len: u32::from_be_bytes(map_len_bytes.try_into().unwrap()),
+        }
+    }
 }
 
 struct TypeListEntry {
@@ -207,74 +323,14 @@ impl From<[u8; 12]> for ReferenceListEntry {
             name_list_offset: u16::from_be_bytes(bytes[2..4].try_into().unwrap()),
             attributes: bytes[4],
             data_offset: u32::from_be_bytes(offset_bytes.try_into().unwrap()) & 0x00ffffff,
-            // Last four bytes of entry are unused
+            // Last four bytes of entry are reserved/unused
         }
     }
 }
 
-#[derive(Debug)]
-struct Header {
-    data_offset: u32,
-    map_offset: u32,
-    data_len: u32,
-    map_len: u32,
-}
-
-impl From<[u8; 16]> for Header {
-    fn from(bytes: [u8; 16]) -> Self {
-        let (data_offset_bytes, bytes) = bytes.split_at(std::mem::size_of::<u32>());
-        let (map_offset_bytes, bytes) = bytes.split_at(std::mem::size_of::<u32>());
-        let (data_len_bytes, map_len_bytes) = bytes.split_at(std::mem::size_of::<u32>());
-
-        Header {
-            data_offset: u32::from_be_bytes(data_offset_bytes.try_into().unwrap()),
-            map_offset: u32::from_be_bytes(map_offset_bytes.try_into().unwrap()),
-            data_len: u32::from_be_bytes(data_len_bytes.try_into().unwrap()),
-            map_len: u32::from_be_bytes(map_len_bytes.try_into().unwrap()),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum ResourceError {
-    IoError,
-    NotFound,
-}
-
-impl From<std::io::Error> for ResourceError {
-    fn from(_: Error) -> Self {
-        // TODO
-        ResourceError::IoError
-    }
-}
-
-#[derive(Debug)]
 struct ResourceMapEntry {
     metadata: ResourceMetadata,
     data_offset: u32,
-}
-
-#[derive(Clone, Debug)]
-pub struct ResourceMetadata {
-    resource_type: ResourceType,
-    id: u16,
-    name: Option<String>,
-    attributes: u8,
-}
-
-pub struct Resource {
-    data: Vec<u8>,
-    metadata: ResourceMetadata,
-}
-
-impl Resource {
-    pub fn data(&self) -> &Vec<u8> {
-        &self.data
-    }
-
-    pub fn metadata(&self) -> &ResourceMetadata {
-        &self.metadata
-    }
 }
 
 #[cfg(test)]
