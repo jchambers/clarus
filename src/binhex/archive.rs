@@ -60,7 +60,7 @@ impl<R: Read> BinHexArchive<R> {
 
         Ok(BinHexArchive {
             source: expander,
-            header: header,
+            header,
         })
     }
 
