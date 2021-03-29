@@ -4,7 +4,6 @@ description = "Tools for working with classic Mac OS resources in Rust"
 version = "0.1.0"
 authors = ["Jon Chambers <jon.chambers@gmail.com>"]
 edition = "2018"
-rust = "1.50"
 
 [dependencies]
 crc16 = "0.4.0"
