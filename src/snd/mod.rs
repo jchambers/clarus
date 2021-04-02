@@ -1,10 +1,15 @@
 mod command;
+mod sampled;
 
 use crate::snd::command::SoundCommand;
 use crate::snd::DataFormat::SquareWave;
 use std::convert::{TryFrom, TryInto};
 
 pub type Frequency = fixed::types::U16F16;
+
+pub const RATE_44_KHZ: Frequency = Frequency::from_bits(0xac440000);
+pub const RATE_22_KHZ: Frequency = Frequency::from_bits(0x56ee8ba3);
+pub const RATE_11_KHZ: Frequency = Frequency::from_bits(0x2b7745d1);
 
 #[derive(Debug)]
 pub struct SndResource {
@@ -123,16 +128,6 @@ impl TryFrom<&[u8; 6]> for DataFormat {
     }
 }
 
-struct SoundHeader {
-    len: u32,
-    sample_rate: Frequency,
-    loop_start: u32,
-    loop_end: u32,
-    encode: u8,
-    base_frequency: u8,
-    samples: Vec<u8>,
-}
-
 #[derive(Debug)]
 pub enum SoundError {
     IllegalResourceFormat(u16),
@@ -143,6 +138,8 @@ pub enum SoundError {
         param1: u16,
         param2: u32,
     },
+    UnresolveablePointer,
+    UnsupportedSoundFormat(u8),
     CorruptResource,
 }
 
