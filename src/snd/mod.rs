@@ -2,7 +2,8 @@ mod command;
 mod sampled;
 
 use crate::snd::command::SoundCommand;
-use crate::snd::DataFormat::SquareWave;
+use crate::snd::sampled::SampledSound;
+use fixed::types::U16F16;
 use std::convert::{TryFrom, TryInto};
 
 pub type Frequency = fixed::types::U16F16;
@@ -16,7 +17,6 @@ pub struct SndResource {
     resource_format: ResourceFormat,
     data_formats: Vec<DataFormat>,
     commands: Vec<SoundCommand>,
-    sound_data: Vec<u8>,
 }
 
 impl TryFrom<&[u8]> for SndResource {
@@ -73,14 +73,92 @@ impl TryFrom<&[u8]> for SndResource {
 
         for offset in (commands_offset..commands_offset + (command_count * 8)).step_by(8) {
             let command_bytes: &[u8; 8] = bytes[offset..offset + 8].try_into().unwrap();
-            commands.push(SoundCommand::try_from(command_bytes)?);
+
+            let command_id = u16::from_be_bytes(command_bytes[0..2].try_into().unwrap());
+            let param1 = u16::from_be_bytes(command_bytes[2..4].try_into().unwrap());
+            let param2 = u32::from_be_bytes(command_bytes[4..8].try_into().unwrap());
+            let offset_bit_set = command_id & 0x8000 != 0;
+
+            let command = match command_id & 0x7fff {
+                0 => SoundCommand::Null,
+                3 => SoundCommand::Quiet,
+                4 => SoundCommand::Flush,
+                10 => SoundCommand::Wait { duration: param1 },
+                11 => SoundCommand::Pause,
+                12 => SoundCommand::Resume,
+                13 => SoundCommand::Callback(param1, param2),
+                14 => SoundCommand::Sync {
+                    identifier: param2,
+                    count: param1,
+                },
+                40 => SoundCommand::FreqDuration {
+                    note: Frequency::from_bits(param2),
+                    duration: param1,
+                },
+                41 => SoundCommand::Rest { duration: param1 },
+                42 => SoundCommand::Freq {
+                    frequency: Frequency::from_bits(param2),
+                },
+                43 => {
+                    if param1 <= 255 {
+                        SoundCommand::Amp {
+                            amplitude: (param1 & 0x00ff) as u8,
+                        }
+                    } else {
+                        return Err(SoundError::IllegalParameter {
+                            command: 43,
+                            param1,
+                            param2,
+                        });
+                    }
+                }
+                44 => {
+                    // Yes, less than. For whatever reason, timbre is bounded between 0 and 254,
+                    // inclusive.
+                    if param1 < 255 {
+                        SoundCommand::Timbre {
+                            timbre: (param1 & 0x00ff) as u8,
+                        }
+                    } else {
+                        return Err(SoundError::IllegalParameter {
+                            command: 44,
+                            param1,
+                            param2,
+                        });
+                    }
+                }
+                60 => SoundCommand::WaveTable { len: param1 },
+                80 => {
+                    if !offset_bit_set {
+                        return Err(SoundError::UnresolveablePointer);
+                    }
+
+                    SoundCommand::Sound {
+                        sound: SampledSound::try_from(&bytes[param2 as usize..])?,
+                    }
+                }
+                81 => {
+                    if !offset_bit_set {
+                        return Err(SoundError::UnresolveablePointer);
+                    }
+
+                    SoundCommand::Buffer {
+                        sound: SampledSound::try_from(&bytes[param2 as usize..])?,
+                    }
+                }
+                82 => SoundCommand::Rate {
+                    multiplier: U16F16::from_bits(param2),
+                },
+                id => return Err(SoundError::IllegalCommand(id)),
+            };
+
+            commands.push(command);
         }
 
         Ok(SndResource {
             resource_format,
             data_formats,
             commands,
-            sound_data: vec![],
         })
     }
 }

@@ -1,6 +1,6 @@
-use crate::snd::{Frequency, SoundError};
+use crate::snd::sampled::SampledSound;
+use crate::snd::Frequency;
 use fixed::types::U16F16;
-use std::convert::{TryFrom, TryInto};
 
 /// A Sound Manager command that might be found in an `'snd '` resource.
 ///
@@ -73,88 +73,14 @@ pub enum SoundCommand {
     },
 
     Sound {
-        offset: Option<u32>,
+        sound: SampledSound,
     },
 
     Buffer {
-        offset: Option<u32>,
+        sound: SampledSound,
     },
 
     Rate {
         multiplier: U16F16,
     },
-}
-
-impl TryFrom<&[u8; 8]> for SoundCommand {
-    type Error = SoundError;
-
-    fn try_from(bytes: &[u8; 8]) -> Result<Self, Self::Error> {
-        let command_id = u16::from_be_bytes(bytes[0..2].try_into().unwrap());
-        let param1 = u16::from_be_bytes(bytes[2..4].try_into().unwrap());
-        let param2 = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
-        let offset_bit_set = command_id & 0x8000 != 0;
-
-        let command = match command_id & 0x7fff {
-            0 => SoundCommand::Null,
-            3 => SoundCommand::Quiet,
-            4 => SoundCommand::Flush,
-            10 => SoundCommand::Wait { duration: param1 },
-            11 => SoundCommand::Pause,
-            12 => SoundCommand::Resume,
-            13 => SoundCommand::Callback(param1, param2),
-            14 => SoundCommand::Sync {
-                identifier: param2,
-                count: param1,
-            },
-            40 => SoundCommand::FreqDuration {
-                note: Frequency::from_bits(param2),
-                duration: param1,
-            },
-            41 => SoundCommand::Rest { duration: param1 },
-            42 => SoundCommand::Freq {
-                frequency: Frequency::from_bits(param2),
-            },
-            43 => {
-                if param1 <= 255 {
-                    SoundCommand::Amp {
-                        amplitude: (param1 & 0x00ff) as u8,
-                    }
-                } else {
-                    return Err(SoundError::IllegalParameter {
-                        command: 43,
-                        param1,
-                        param2,
-                    });
-                }
-            }
-            44 => {
-                // Yes, less than. For whatever reason, timbre is bounded between 0 and 254,
-                // inclusive.
-                if param1 < 255 {
-                    SoundCommand::Timbre {
-                        timbre: (param1 & 0x00ff) as u8,
-                    }
-                } else {
-                    return Err(SoundError::IllegalParameter {
-                        command: 44,
-                        param1,
-                        param2,
-                    });
-                }
-            }
-            60 => SoundCommand::WaveTable { len: param1 },
-            80 => SoundCommand::Sound {
-                offset: if offset_bit_set { Some(param2) } else { None },
-            },
-            81 => SoundCommand::Buffer {
-                offset: if offset_bit_set { Some(param2) } else { None },
-            },
-            82 => SoundCommand::Rate {
-                multiplier: U16F16::from_bits(param2),
-            },
-            id => return Err(SoundError::IllegalCommand(id)),
-        };
-
-        Ok(command)
-    }
 }
