@@ -12,11 +12,26 @@ pub const RATE_44_KHZ: Frequency = Frequency::from_bits(0xac440000);
 pub const RATE_22_KHZ: Frequency = Frequency::from_bits(0x56ee8ba3);
 pub const RATE_11_KHZ: Frequency = Frequency::from_bits(0x2b7745d1);
 
+/// A `'snd '` resource represents a sound.
 #[derive(Debug)]
 pub struct SndResource {
     resource_format: ResourceFormat,
     data_formats: Vec<DataFormat>,
     commands: Vec<SoundCommand>,
+}
+
+impl SndResource {
+    fn resource_format(&self) -> ResourceFormat {
+        self.resource_format
+    }
+
+    fn data_formats(&self) -> &Vec<DataFormat> {
+        &self.data_formats
+    }
+
+    fn commands(&self) -> &Vec<SoundCommand> {
+        &self.commands
+    }
 }
 
 impl TryFrom<&[u8]> for SndResource {
@@ -91,14 +106,32 @@ impl TryFrom<&[u8]> for SndResource {
                     identifier: param2,
                     count: param1,
                 },
-                40 => SoundCommand::FreqDuration {
-                    note: Frequency::from_bits(param2),
-                    duration: param1,
-                },
+                40 => {
+                    if param2 > 127 {
+                        return Err(SoundError::IllegalParameter {
+                            command: 40,
+                            param1,
+                            param2,
+                        });
+                    }
+
+                    SoundCommand::FreqDuration {
+                        note: param2 as u8,
+                        duration: param1,
+                    }
+                }
                 41 => SoundCommand::Rest { duration: param1 },
-                42 => SoundCommand::Freq {
-                    frequency: Frequency::from_bits(param2),
-                },
+                42 => {
+                    if param2 > 127 {
+                        return Err(SoundError::IllegalParameter {
+                            command: 42,
+                            param1,
+                            param2,
+                        });
+                    }
+
+                    SoundCommand::Freq { note: param2 as u8 }
+                }
                 43 => {
                     if param1 <= 255 {
                         SoundCommand::Amp {
@@ -163,7 +196,7 @@ impl TryFrom<&[u8]> for SndResource {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceFormat {
     Snd1,
     Snd2,
