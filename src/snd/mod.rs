@@ -1,8 +1,8 @@
 mod command;
 mod sampled;
 
-use crate::snd::command::SoundCommand;
-use crate::snd::sampled::SampledSound;
+pub use crate::snd::command::SoundCommand;
+pub use crate::snd::sampled::SampledSound;
 use fixed::types::U16F16;
 use std::convert::{TryFrom, TryInto};
 
@@ -12,7 +12,11 @@ pub const RATE_44_KHZ: Frequency = Frequency::from_bits(0xac440000);
 pub const RATE_22_KHZ: Frequency = Frequency::from_bits(0x56ee8ba3);
 pub const RATE_11_KHZ: Frequency = Frequency::from_bits(0x2b7745d1);
 
-/// A `'snd '` resource represents a sound.
+/// A `'snd '` resource represents a sound, and `SndResource` instances describe the contents of a
+/// single `'snd '` resource.
+///
+/// Sounds are constructed from one or more commands, and may be produced procedurally or using
+/// sampled data.
 #[derive(Debug)]
 pub struct SndResource {
     resource_format: ResourceFormat,
@@ -21,15 +25,21 @@ pub struct SndResource {
 }
 
 impl SndResource {
-    fn resource_format(&self) -> ResourceFormat {
+    /// Returns the format of this sound resource. [`ResourceFormat::Snd2`] was used primarily for
+    /// HyperCard sounds and was considered obsolete/deprecated by [`ResourceFormat::Snd1`] by 1994
+    /// at the latest.
+    pub fn resource_format(&self) -> ResourceFormat {
         self.resource_format
     }
 
-    fn data_formats(&self) -> &Vec<DataFormat> {
+    /// Returns the "data formats" described by this sound resource. May be empty for `Snd1`
+    /// resources and is always empty for `Snd2` resources.
+    pub fn data_formats(&self) -> &Vec<DataFormat> {
         &self.data_formats
     }
 
-    fn commands(&self) -> &Vec<SoundCommand> {
+    /// Returns the list of commands contained in this sound resource.
+    pub fn commands(&self) -> &Vec<SoundCommand> {
         &self.commands
     }
 }
@@ -98,7 +108,7 @@ impl TryFrom<&[u8]> for SndResource {
                 0 => SoundCommand::Null,
                 3 => SoundCommand::Quiet,
                 4 => SoundCommand::Flush,
-                10 => SoundCommand::Wait { duration: param1 },
+                10 => SoundCommand::Wait(param1),
                 11 => SoundCommand::Pause,
                 12 => SoundCommand::Resume,
                 13 => SoundCommand::Callback(param1, param2),
@@ -120,7 +130,7 @@ impl TryFrom<&[u8]> for SndResource {
                         duration: param1,
                     }
                 }
-                41 => SoundCommand::Rest { duration: param1 },
+                41 => SoundCommand::Rest(param1),
                 42 => {
                     if param2 > 127 {
                         return Err(SoundError::IllegalParameter {
@@ -130,13 +140,11 @@ impl TryFrom<&[u8]> for SndResource {
                         });
                     }
 
-                    SoundCommand::Freq { note: param2 as u8 }
+                    SoundCommand::Freq(param2 as u8)
                 }
                 43 => {
                     if param1 <= 255 {
-                        SoundCommand::Amp {
-                            amplitude: (param1 & 0x00ff) as u8,
-                        }
+                        SoundCommand::Amp(param1 as u8)
                     } else {
                         return Err(SoundError::IllegalParameter {
                             command: 43,
@@ -149,9 +157,7 @@ impl TryFrom<&[u8]> for SndResource {
                     // Yes, less than. For whatever reason, timbre is bounded between 0 and 254,
                     // inclusive.
                     if param1 < 255 {
-                        SoundCommand::Timbre {
-                            timbre: (param1 & 0x00ff) as u8,
-                        }
+                        SoundCommand::Timbre(param1 as u8)
                     } else {
                         return Err(SoundError::IllegalParameter {
                             command: 44,
@@ -160,28 +166,35 @@ impl TryFrom<&[u8]> for SndResource {
                         });
                     }
                 }
-                60 => SoundCommand::WaveTable { len: param1 },
+                60 => {
+                    if !offset_bit_set {
+                        return Err(SoundError::UnresolveablePointer);
+                    }
+
+                    let len = param1 as usize;
+                    let offset = param2 as usize;
+
+                    if bytes.len() < offset + len {
+                        return Err(SoundError::CorruptResource);
+                    }
+
+                    SoundCommand::WaveTable(Vec::from(&bytes[offset..offset + len]))
+                }
                 80 => {
                     if !offset_bit_set {
                         return Err(SoundError::UnresolveablePointer);
                     }
 
-                    SoundCommand::Sound {
-                        sound: SampledSound::try_from(&bytes[param2 as usize..])?,
-                    }
+                    SoundCommand::Sound(SampledSound::try_from(&bytes[param2 as usize..])?)
                 }
                 81 => {
                     if !offset_bit_set {
                         return Err(SoundError::UnresolveablePointer);
                     }
 
-                    SoundCommand::Buffer {
-                        sound: SampledSound::try_from(&bytes[param2 as usize..])?,
-                    }
+                    SoundCommand::Buffer(SampledSound::try_from(&bytes[param2 as usize..])?)
                 }
-                82 => SoundCommand::Rate {
-                    multiplier: U16F16::from_bits(param2),
-                },
+                82 => SoundCommand::Rate(U16F16::from_bits(param2)),
                 id => return Err(SoundError::IllegalCommand(id)),
             };
 
@@ -260,11 +273,27 @@ mod test {
     use std::convert::TryFrom;
 
     #[test]
-    fn test() {
+    fn load_sound() {
         let bytes = include_bytes!("test.snd");
 
         let snd = SndResource::try_from(&bytes[..]).unwrap();
 
-        assert_eq!(ResourceFormat::Snd1, snd.resource_format);
+        assert_eq!(ResourceFormat::Snd1, snd.resource_format());
+
+        assert_eq!(1, snd.data_formats().len());
+        assert!(matches!(
+            &snd.data_formats()[0],
+            DataFormat::SampledSound(_)
+        ));
+
+        assert_eq!(1, snd.commands().len());
+
+        if let SoundCommand::Buffer(ref sampled_sound) = snd.commands()[0] {
+            assert_eq!(RATE_22_KHZ, sampled_sound.sample_rate());
+            assert_eq!(60, sampled_sound.base_frequency());
+            assert!(!sampled_sound.samples().is_empty());
+        } else {
+            panic!("Unexpected sound command");
+        }
     }
 }

@@ -10,6 +10,24 @@ pub struct SampledSound {
     samples: Vec<u8>,
 }
 
+impl SampledSound {
+    pub fn sample_rate(&self) -> Frequency {
+        self.sample_rate
+    }
+
+    pub fn loop_range(&self) -> &Option<Range<u32>> {
+        &self.loop_range
+    }
+
+    pub fn base_frequency(&self) -> u8 {
+        self.base_frequency
+    }
+
+    pub fn samples(&self) -> &Vec<u8> {
+        &self.samples
+    }
+}
+
 impl TryFrom<&[u8]> for SampledSound {
     type Error = SoundError;
 

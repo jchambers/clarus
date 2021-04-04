@@ -23,7 +23,7 @@ pub enum SoundCommand {
 
     /// Suspend further command processing in a channel until the specified duration has elapsed.
     /// The duration is given in units of half-milliseconds.
-    Wait { duration: u16 },
+    Wait(u16),
 
     /// Pause any further command processing in a channel until a [`SoundCommand::Resume`] is
     /// received.
@@ -49,35 +49,33 @@ pub enum SoundCommand {
     FreqDuration { note: u8, duration: u16 },
 
     /// Rest a channel for the specified duration in units of half-milliseconds.
-    Rest { duration: u16 },
+    Rest(u16),
 
     /// Change the frequency/pitch of a sound to the given note (specified as a MIDI note value), or
     /// start playing at the given frequency if no sound is currently playing.
-    Freq { note: u8 },
+    Freq(u8),
 
     /// Change the amplitude of the currently-playing sound or of the next sound to be played if no
     /// sound is currently playing.
-    Amp { amplitude: u8 },
+    Amp(u8),
 
     /// Change the timbre (or tone) of a sound currently being defined using square-wave data. A
     /// timbre value of 0 produces a clear tone; a timbre value of 254 produces a buzzing tone.
     /// Only applicable to square-wave sounds.
-    Timbre { timbre: u8 },
+    Timbre(u8),
 
-    /// Install a wave table as a voice in the configured channel. TODO: Is the "pointer" to a
-    /// location in memory, or can it be to an offset in the resource if the "offset bit" is set?
-    /// The docs are unclear.
-    WaveTable { len: u16 },
+    /// Install a wave table as a voice in the configured channel.
+    WaveTable(Vec<u8>),
 
     /// Install a sampled sound as a voice in a channel.
-    Sound { sound: SampledSound },
+    Sound(SampledSound),
 
     /// Play a buffer of sampled-sound data.
-    Buffer { sound: SampledSound },
+    Buffer(SampledSound),
 
     /// Set the rate of a sampled sound that is currently playing, effectively altering its pitch
     /// and duration. A rate of 0 to pauses a sampled sound that is playing. The rate is given as a
     /// multiplier of 22 kHz; to set the rate to 44 kHz, for example, use a multiplier of 2.0. Only
     /// applies to sampled sounds.
-    Rate { multiplier: U16F16 },
+    Rate(U16F16),
 }
